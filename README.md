@@ -14,16 +14,29 @@ Posts currently live in an in-memory list in `main.py`; there is no database yet
 - Static file serving mounted at `/static`
 - PWA basics: web app manifest, favicons, touch icons, and theme color
 - JSON API alongside the HTML pages, with interactive docs
+- Content-aware error handling: `/api/*` paths return JSON, page routes render an error template
 
 ## Endpoints
 
-| Method | Path         | Response | Description                          |
-| ------ | ------------ | -------- | ------------------------------------ |
-| `GET`  | `/`          | HTML     | Home page, renders `home.html`       |
-| `GET`  | `/posts`     | HTML     | Same handler as `/`                  |
-| `GET`  | `/api/posts` | JSON     | All posts                            |
+| Method | Path                   | Response | Description                            |
+| ------ | ---------------------- | -------- | -------------------------------------- |
+| `GET`  | `/`                    | HTML     | Home page, lists all posts             |
+| `GET`  | `/posts`               | HTML     | Same handler as `/`                    |
+| `GET`  | `/posts/{post_id}`     | HTML     | Single post page                       |
+| `GET`  | `/api/posts`           | JSON     | All posts                              |
+| `GET`  | `/api/posts/{post_id}` | JSON     | Single post                            |
 
-The HTML routes are excluded from the OpenAPI schema, so `/docs` shows only `/api/posts`.
+The HTML routes are excluded from the OpenAPI schema, so `/docs` shows only the `/api` routes.
+
+### Error handling
+
+Exception handlers are registered for `HTTPException` and `RequestValidationError`, and
+they branch on the request path:
+
+- Requests under `/api` get a JSON body, e.g. `{"detail": "Post not found"}`
+- Everything else renders `error.html` inside the normal site layout
+
+An unknown id returns `404`; a non-integer id fails path validation and returns `422`.
 
 ## Requirements
 
@@ -60,7 +73,9 @@ The app is then available at:
 ├── main.py                  # FastAPI app: routes, template/static config, post data
 ├── templates/
 │   ├── layout.html          # Base template: head, navbar, sidebar, footer, theme toggle
-│   └── home.html            # Post list, extends layout.html
+│   ├── home.html            # Post list, extends layout.html
+│   ├── post.html            # Single post page, with edit/delete actions
+│   └── error.html           # Error page used by the exception handlers
 ├── static/
 │   ├── css/main.css         # Custom styles on top of Bootstrap
 │   ├── js/utils.js          # Placeholder for shared scripts
@@ -76,7 +91,7 @@ The app is then available at:
 Ideas to build on as the project grows:
 
 - [x] Render real templates with Jinja2 instead of inline HTML
-- [ ] Add a detail route for a single post (`/posts/{id}`)
+- [x] Add a detail route for a single post (`/posts/{id}`)
 - [ ] Move posts into a database (SQLite via SQLModel)
 - [ ] Add Pydantic models for request/response validation
 - [ ] Support creating, updating, and deleting posts
