@@ -15,6 +15,7 @@ Posts currently live in an in-memory list in `main.py`; there is no database yet
 - PWA basics: web app manifest, favicons, touch icons, and theme color
 - JSON API alongside the HTML pages, with interactive docs
 - Content-aware error handling: `/api/*` paths return JSON, page routes render an error template
+- Pydantic schemas validating request bodies and shaping API responses
 
 ## Endpoints
 
@@ -24,6 +25,7 @@ Posts currently live in an in-memory list in `main.py`; there is no database yet
 | `GET`  | `/posts`               | HTML     | Same handler as `/`                    |
 | `GET`  | `/posts/{post_id}`     | HTML     | Single post page                       |
 | `GET`  | `/api/posts`           | JSON     | All posts                              |
+| `POST` | `/api/posts`           | JSON     | Create a post, returns `201`           |
 | `GET`  | `/api/posts/{post_id}` | JSON     | Single post                            |
 
 The HTML routes are excluded from the OpenAPI schema, so `/docs` shows only the `/api` routes.
@@ -71,6 +73,7 @@ The app is then available at:
 ```
 .
 ├── main.py                  # FastAPI app: routes, template/static config, post data
+├── schemas.py               # Pydantic models for request and response bodies
 ├── templates/
 │   ├── layout.html          # Base template: head, navbar, sidebar, footer, theme toggle
 │   ├── home.html            # Post list, extends layout.html
