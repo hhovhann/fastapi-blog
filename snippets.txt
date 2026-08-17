@@ -1,0 +1,16 @@
+posts: list[dict] = [
+    {
+        "id": 1,
+        "author": "Corey Schafer",
+        "title": "FastAPI is Awesome",
+        "content": "This framework is really easy to use and superfast.",
+        "data_posted": "April 20, 2025"
+    },
+    {
+        "id": 2,
+        "author": "Jane Doe",
+        "title": "Python is Great for Web Development",
+        "content": "Python is great language for web development, and FastAPI makes it even better.",
+        "data_posted": "April 21, 2025"
+    },
+]
