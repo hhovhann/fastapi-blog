@@ -73,7 +73,7 @@ in `static/profile_pics/` otherwise.
 | `GET`  | `/login`                | Login form                           |
 | `GET`  | `/register`             | Registration form                    |
 | `GET`  | `/account`              | Account settings for the logged-in user |
-| `GET`  | `/forgot-password`      | Form to request a reset link         |
+| `GET`  | `/forgot-password`      | Form to request a reset link, linked from `/login` |
 | `GET`  | `/reset-password`       | Form to set a new password, reached from the email |
 
 ### JSON API
@@ -210,6 +210,13 @@ token cannot be replayed.
 `PATCH /api/users/me/password` is the logged-in path. It verifies the current password before
 accepting a new one, and also clears any outstanding reset tokens — so if someone requested a
 reset link and then remembered their password, the emailed link stops working.
+
+On the page side, `/forgot-password` collects the address and `/reset-password` reads the
+token out of its own query string, so the token never goes into a form field or a template
+variable. That page also sends `Referrer-Policy: no-referrer`, which matters because the token
+sits in the URL — without it the browser would leak the full address to the CDNs the layout
+loads Bootstrap and fonts from. Opening it without a token disables the submit button, and
+the confirm field is checked before anything is sent.
 
 The mail settings (`MAIL_SERVER`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_FROM`,
 `MAIL_USE_TLS`) and `FRONTEND_URL`, which builds the link in the email, all come from `.env`.
@@ -400,14 +407,14 @@ The app is then available at:
 │   ├── register.html        # Registration form
 │   ├── account.html         # Account settings, profile update, change password, delete account
 │   ├── forgot_password.html # Request a reset link
+│   ├── reset_password.html  # Set a new password, opened from the emailed link
+│   ├── error.html           # Error page used by the exception handlers
 │   └── email/
 │       └── password_reset.html  # HTML body of the reset email
-│   └── error.html           # Error page used by the exception handlers
 ├── static/
 │   ├── css/main.css         # Custom styles on top of Bootstrap
-│   ├── js/utils.js          # ES module: error message + modal helpers
+│   ├── js/utils.js          # ES module: modals, error messages, escapeHtml, formatDate
 │   ├── js/auth.js           # ES module: token storage and current-user cache
-│   │                        # utils.js also holds escapeHtml and formatDate
 │   ├── icons/               # Favicons, touch icons, PWA icons
 │   ├── profile_pics/        # Default avatar
 │   └── site.webmanifest     # PWA manifest
@@ -439,7 +446,5 @@ Ideas to build on as the project grows:
 - [x] Avatar uploads writing into `media/profile_pics/`
 - [x] Paginate the post listings instead of returning every row
 - [x] Password reset over email, with single-use expiring tokens
-- [ ] Finish the reset UI: `templates/reset_password.html` is referenced by `main.py` but does
-      not exist yet, so the link in the reset email 500s
 - [ ] Database migrations with Alembic, instead of `create_all` on startup
 - [ ] Add tests with `pytest` and `httpx`
