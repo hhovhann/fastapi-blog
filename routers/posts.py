@@ -6,23 +6,26 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 import models
+from auth import CurrentUser
+from config import settings
 from database import get_db
 from schemas import PaginatedPostsResponse, PostCreate, PostResponse, PostUpdate
-from auth import CurrentUser
 
 router = APIRouter()
 
 
 @router.get("", response_model=PaginatedPostsResponse)
-async def get_posts(db: Annotated[AsyncSession, Depends(get_db)],
-                    skip: Annotated[int, Query(ge=0)] = 0,
-                    limit: Annotated[int, Query(ge=1, le=100)] = 10,
-                    ):
+async def get_posts(
+        db: Annotated[AsyncSession, Depends(get_db)],
+        skip: Annotated[int, Query(ge=0)] = 0,
+        limit: Annotated[int, Query(ge=1, le=100)] = settings.posts_per_page,
+):
     count_result = await db.execute(select(func.count()).select_from(models.Post))
     total = count_result.scalar() or 0
 
     result = await db.execute(
-        select(models.Post).options(selectinload(models.Post.author))
+        select(models.Post)
+        .options(selectinload(models.Post.author))
         .order_by(models.Post.date_posted.desc())
         .offset(skip)
         .limit(limit),
@@ -45,7 +48,11 @@ async def get_posts(db: Annotated[AsyncSession, Depends(get_db)],
     response_model=PostResponse,
     status_code=status.HTTP_201_CREATED,
 )
-async def create_post(post: PostCreate, current_user: CurrentUser, db: Annotated[AsyncSession, Depends(get_db)]):
+async def create_post(
+        post: PostCreate,
+        current_user: CurrentUser,
+        db: Annotated[AsyncSession, Depends(get_db)],
+):
     new_post = models.Post(
         title=post.title,
         content=post.content,
@@ -73,8 +80,8 @@ async def get_post(post_id: int, db: Annotated[AsyncSession, Depends(get_db)]):
 @router.put("/{post_id}", response_model=PostResponse)
 async def update_post_full(
         post_id: int,
-        current_user: CurrentUser,
         post_data: PostCreate,
+        current_user: CurrentUser,
         db: Annotated[AsyncSession, Depends(get_db)],
 ):
     result = await db.execute(select(models.Post).where(models.Post.id == post_id))
@@ -88,7 +95,7 @@ async def update_post_full(
     if post.user_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authenticated to update this post",
+            detail="Not authorized to update this post",
         )
 
     post.title = post_data.title
@@ -113,10 +120,11 @@ async def update_post_partial(
             status_code=status.HTTP_404_NOT_FOUND,
             detail="Post not found",
         )
+
     if post.user_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authenticated to update this post",
+            detail="Not authorized to update this post",
         )
 
     update_data = post_data.model_dump(exclude_unset=True)
@@ -129,7 +137,11 @@ async def update_post_partial(
 
 
 @router.delete("/{post_id}", status_code=status.HTTP_204_NO_CONTENT)
-async def delete_post(post_id: int, current_user: CurrentUser, db: Annotated[AsyncSession, Depends(get_db)]):
+async def delete_post(
+        post_id: int,
+        current_user: CurrentUser,
+        db: Annotated[AsyncSession, Depends(get_db)],
+):
     result = await db.execute(select(models.Post).where(models.Post.id == post_id))
     post = result.scalars().first()
     if not post:
@@ -141,7 +153,7 @@ async def delete_post(post_id: int, current_user: CurrentUser, db: Annotated[Asy
     if post.user_id != current_user.id:
         raise HTTPException(
             status_code=status.HTTP_403_FORBIDDEN,
-            detail="Not authenticated to delete this post",
+            detail="Not authorized to delete this post",
         )
 
     await db.delete(post)
