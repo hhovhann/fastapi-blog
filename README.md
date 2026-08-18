@@ -17,7 +17,7 @@ created on startup and is not tracked in git.
 - Users and posts as related tables, so a post knows its author and a user knows its posts
 - Static file serving mounted at `/static`, uploaded media at `/media`
 - PWA basics: web app manifest, favicons, touch icons, and theme color
-- JSON API alongside the HTML pages, with interactive docs
+- JSON API alongside the HTML pages, with interactive docs, covering full CRUD for posts and users
 - Content-aware error handling: `/api/*` paths return JSON, page routes render an error template
 - Pydantic schemas validating request bodies and shaping API responses
 
@@ -30,7 +30,8 @@ Two tables, defined in `models.py`:
 | `User` | `id`, `username` (unique), `email` (unique), `image_file` |
 | `Post` | `id`, `title`, `content`, `user_id` → `users.id`, `date_posted` |
 
-`Post.author` and `User.posts` are the two sides of the relationship. `User.image_path`
+`Post.author` and `User.posts` are the two sides of the relationship, configured with
+`cascade="all, delete-orphan"` so deleting a user also deletes their posts. `User.image_path`
 returns the user's uploaded avatar when one is set, and falls back to the default picture
 in `static/profile_pics/` otherwise.
 
@@ -47,18 +48,30 @@ in `static/profile_pics/` otherwise.
 
 ### JSON API
 
-| Method | Path                   | Description                                     |
-| ------ | ---------------------- | ----------------------------------------------- |
-| `GET`  | `/api/posts`           | All posts                                       |
-| `POST` | `/api/posts`           | Create a post, returns `201`                    |
-| `GET`  | `/api/posts/{post_id}` | Single post                                     |
-| `POST` | `/api/users`           | Create a user, returns `201`                    |
-| `GET`  | `/api/users/{user_id}` | Single user                                     |
+| Method   | Path                   | Description                                    |
+| -------- | ---------------------- | ---------------------------------------------- |
+| `GET`    | `/api/posts`           | All posts                                      |
+| `POST`   | `/api/posts`           | Create a post, returns `201`                   |
+| `GET`    | `/api/posts/{post_id}` | Single post                                    |
+| `PUT`    | `/api/posts/{post_id}` | Replace a post, every field required           |
+| `PATCH`  | `/api/posts/{post_id}` | Update only the fields that are sent           |
+| `DELETE` | `/api/posts/{post_id}` | Delete a post, returns `204`                   |
+| `POST`   | `/api/users`           | Create a user, returns `201`                   |
+| `GET`    | `/api/users/{user_id}` | Single user                                    |
+| `PATCH`  | `/api/users/{user_id}` | Update only the fields that are sent           |
+| `DELETE` | `/api/users/{user_id}` | Delete a user and their posts, returns `204`   |
 
 The page routes are excluded from the OpenAPI schema, so `/docs` shows only the `/api` routes.
 
 Creating a user rejects a duplicate `username` or `email` with `400`. Creating a post
 requires a `user_id` that exists, and returns `404` when it does not.
+
+`PUT` is a full replacement: it takes the same body as `POST /api/posts`, so `title`,
+`content`, and `user_id` all have to be sent, and moving a post to another author returns
+`404` if that user does not exist. `PATCH` takes a partial body — `PostUpdate` and
+`UserUpdate` make every field optional, and only the fields present in the request are
+written. Updating a user to a `username` or `email` that another user already has returns
+`400`. Both deletes return `204` with an empty body, and `404` for an unknown id.
 
 ### Error handling
 
@@ -147,7 +160,7 @@ Ideas to build on as the project grows:
 - [x] Add a detail route for a single post (`/posts/{id}`)
 - [x] Move posts into a database (SQLite via SQLAlchemy)
 - [x] Add Pydantic models for request/response validation
-- [ ] Support creating, updating, and deleting posts
+- [x] Support creating, updating, and deleting posts
 - [ ] Add HTML forms for writing posts, rather than JSON-only endpoints
 - [ ] User accounts with real authentication, so the Login and Register buttons work,
       and `user_id` comes from the session instead of the request body
