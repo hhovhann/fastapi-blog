@@ -8,6 +8,10 @@ Posts and users are stored in a local SQLite database, reached asynchronously th
 SQLAlchemy's async engine and `aiosqlite`. Every route is an `async def` coroutine. The
 database file is created on startup and is not tracked in git.
 
+Writing, editing, and deleting posts happens in the browser: Bootstrap modals collect the
+input and `fetch` calls talk to the same JSON API the docs expose, so no page does a
+classic form POST.
+
 ## Features
 
 - Server-rendered pages with Jinja2 template inheritance (`layout.html` → `home.html`)
@@ -23,6 +27,11 @@ database file is created on startup and is not tracked in git.
 - JSON API alongside the HTML pages, with interactive docs, covering full CRUD for posts and users
 - API endpoints split into `APIRouter` modules under `routers/`, mounted with a path prefix
   and a tag, so `main.py` keeps only the page routes and app setup
+- Post creating, editing, and deleting driven from the page with Bootstrap modals and
+  `fetch` against the JSON API, with success and error modals for the result
+- Shared front-end helpers in an ES module (`static/js/utils.js`), imported by the page
+  scripts with `<script type="module">`
+- Posts listed newest first everywhere, on the pages and in the API
 - Content-aware error handling: `/api/*` paths return JSON, page routes render an error template
 - Pydantic schemas validating request bodies and shaping API responses
 
@@ -102,6 +111,38 @@ Two consequences worth knowing about, since both raise `MissingGreenlet` if igno
 Table creation moved out of import time into a `lifespan` context manager, which runs
 `create_all` through `run_sync` on startup and disposes the engine on shutdown.
 
+### Front end
+
+The pages are server-rendered, but the write operations are done from the browser against
+the JSON API rather than through form POSTs and redirects:
+
+| Action      | Where it lives                          | Request                     |
+| ----------- | --------------------------------------- | --------------------------- |
+| New post    | Navbar button, modal in `layout.html`   | `POST /api/posts`           |
+| Edit post   | Buttons on the post page, `post.html`   | `PATCH /api/posts/{id}`     |
+| Delete post | Buttons on the post page, `post.html`   | `DELETE /api/posts/{id}`    |
+
+The create modal lives in `layout.html`, so the New Post button works from any page.
+`post.html` adds its own edit and delete modals and fills a `{% block scripts %}` that
+`layout.html` renders at the end of `<body>`.
+
+`static/js/utils.js` holds the three helpers both scripts share: `getErrorMessage` unpacks
+either shape the API returns — a plain `{"detail": "Post not found"}` string or the list of
+objects a `422` produces — and `showModal` / `hideModal` wrap the Bootstrap modal instances.
+It is a real ES module, so the scripts that use it are `<script type="module">`.
+
+On success the page swaps the form modal for the success modal and reloads once it is
+dismissed; a delete redirects home instead. A failed request shows the message in the error
+modal, and a network failure falls back to a generic one.
+
+Two placeholders are still in the code until authentication lands:
+
+- The create script hardcodes `user_id: 1`, since there is no logged-in user to take it from
+- `post.html` only renders the edit and delete buttons when `post.user_id == 1`
+
+That second one hides the buttons but does not protect anything — the API has no auth yet, so
+`PATCH` and `DELETE` on any post still succeed for anyone who calls them directly.
+
 ### Error handling
 
 Exception handlers are registered for `HTTPException` and `RequestValidationError`, and
@@ -165,14 +206,14 @@ The app is then available at:
 ├── models.py                # SQLAlchemy ORM models: User and Post
 ├── schemas.py               # Pydantic models for request and response bodies
 ├── templates/
-│   ├── layout.html          # Base template: head, navbar, sidebar, footer, theme toggle
+│   ├── layout.html          # Base template: navbar, sidebar, footer, theme toggle, create/result modals
 │   ├── home.html            # Post list, extends layout.html
-│   ├── post.html            # Single post page, with edit/delete actions
+│   ├── post.html            # Single post page, with edit/delete modals and their scripts
 │   ├── user_posts.html      # Posts belonging to one user
 │   └── error.html           # Error page used by the exception handlers
 ├── static/
 │   ├── css/main.css         # Custom styles on top of Bootstrap
-│   ├── js/utils.js          # Placeholder for shared scripts
+│   ├── js/utils.js          # ES module: error message + modal helpers
 │   ├── icons/               # Favicons, touch icons, PWA icons
 │   ├── profile_pics/        # Default avatar
 │   └── site.webmanifest     # PWA manifest
@@ -195,9 +236,11 @@ Ideas to build on as the project grows:
 - [x] Support creating, updating, and deleting posts
 - [x] Convert the app to async, with an async database driver
 - [x] Split the API endpoints into routers
-- [ ] Add HTML forms for writing posts, rather than JSON-only endpoints
+- [x] Add a browser UI for writing posts, rather than JSON-only endpoints
 - [ ] User accounts with real authentication, so the Login and Register buttons work,
-      and `user_id` comes from the session instead of the request body
+      and `user_id` comes from the session instead of the hardcoded `1` in the create script
+- [ ] Authorization on the write endpoints, so only a post's author can edit or delete it,
+      and the template guard in `post.html` reflects a real permission check
 - [ ] Avatar uploads writing into `media/profile_pics/`
 - [ ] Database migrations with Alembic, instead of `create_all` on startup
 - [ ] Add tests with `pytest` and `httpx`
