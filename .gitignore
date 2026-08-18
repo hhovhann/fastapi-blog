@@ -12,3 +12,12 @@ wheels/
 # Editors and OS
 .idea/
 .DS_Store
+
+# Local database
+*.db
+
+# Uploaded media, keep the directories
+media/*
+!media/profile_pics/
+media/profile_pics/*
+!media/profile_pics/.gitkeep
