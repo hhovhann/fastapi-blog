@@ -103,6 +103,24 @@ async def user_posts_page(
     )
 
 
+@app.get("/login", include_in_schema=False, name="login_page")
+async def login_page(request: Request):
+    return templates.TemplateResponse(
+        request,
+        "login.html",
+        {"title": "Login"},
+    )
+
+
+@app.get("/register", include_in_schema=False, name="register_page")
+async def register_page(request: Request):
+    return templates.TemplateResponse(
+        request,
+        "register.html",
+        {"title": "Register"},
+    )
+
+
 @app.exception_handler(StarletteHTTPException)
 async def general_http_exception_handler(
         request: Request,
