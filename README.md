@@ -34,6 +34,8 @@ classic form POST.
 - Posts listed newest first everywhere, on the pages and in the API
 - Registration and login with password hashing (argon2 via [pwdlib](https://pypi.org/project/pwdlib/))
   and JWT access tokens, with settings read from a `.env` file by pydantic-settings
+- Ownership-based authorization: reads are public, writes need a bearer token, and editing or
+  deleting something you do not own returns `403`
 - Content-aware error handling: `/api/*` paths return JSON, page routes render an error template
 - Pydantic schemas validating request bodies and shaping API responses
 
@@ -63,24 +65,28 @@ in `static/profile_pics/` otherwise.
 | `GET`  | `/users/{user_id}/posts`| Posts written by one user            |
 | `GET`  | `/login`                | Login form                           |
 | `GET`  | `/register`             | Registration form                    |
+| `GET`  | `/account`              | Account settings for the logged-in user |
 
 ### JSON API
 
-| Method   | Path                   | Description                                    |
-| -------- | ---------------------- | ---------------------------------------------- |
-| `GET`    | `/api/posts`           | All posts                                      |
-| `POST`   | `/api/posts`           | Create a post, returns `201`                   |
-| `GET`    | `/api/posts/{post_id}` | Single post                                    |
-| `PUT`    | `/api/posts/{post_id}` | Replace a post, every field required           |
-| `PATCH`  | `/api/posts/{post_id}` | Update only the fields that are sent           |
-| `DELETE` | `/api/posts/{post_id}` | Delete a post, returns `204`                   |
-| `POST`   | `/api/users`           | Register a user, returns `201`                 |
-| `POST`   | `/api/users/token`     | Log in with form data, returns a JWT           |
-| `GET`    | `/api/users/me`        | The authenticated user, needs a bearer token   |
-| `GET`    | `/api/users/{user_id}` | Single user                                    |
-| `GET`    | `/api/users/{user_id}/posts` | Posts written by one user                |
-| `PATCH`  | `/api/users/{user_id}` | Update only the fields that are sent           |
-| `DELETE` | `/api/users/{user_id}` | Delete a user and their posts, returns `204`   |
+| Method   | Path                         | Auth       | Description                              |
+| -------- | ---------------------------- | ---------- | ---------------------------------------- |
+| `GET`    | `/api/posts`                 | public     | All posts, newest first                  |
+| `POST`   | `/api/posts`                 | token      | Create a post as yourself, returns `201` |
+| `GET`    | `/api/posts/{post_id}`       | public     | Single post                              |
+| `PUT`    | `/api/posts/{post_id}`       | **owner**  | Replace a post, every field required     |
+| `PATCH`  | `/api/posts/{post_id}`       | **owner**  | Update only the fields that are sent     |
+| `DELETE` | `/api/posts/{post_id}`       | **owner**  | Delete a post, returns `204`             |
+| `POST`   | `/api/users`                 | public     | Register a user, returns `201`           |
+| `POST`   | `/api/users/token`           | public     | Log in with form data, returns a JWT     |
+| `GET`    | `/api/users/me`              | token      | The authenticated user                   |
+| `GET`    | `/api/users/{user_id}`       | public     | Single user                              |
+| `GET`    | `/api/users/{user_id}/posts` | public     | Posts written by one user                |
+| `PATCH`  | `/api/users/{user_id}`       | **owner**  | Update only the fields that are sent     |
+| `DELETE` | `/api/users/{user_id}`       | **owner**  | Delete a user and their posts, `204`     |
+
+`public` needs nothing, `token` needs any valid bearer token, and **owner** additionally
+requires that the token belongs to the post's author or to that same account.
 
 The page routes are excluded from the OpenAPI schema, so `/docs` shows only the `/api` routes,
 grouped into `users` and `posts` sections by the tag each router is included with.
@@ -89,12 +95,12 @@ The paths above are the full URLs. Inside the router modules the paths are writt
 to the prefix given in `main.py` — `@router.get("/{post_id}")` in `routers/posts.py` becomes
 `/api/posts/{post_id}` because the router is included with `prefix="/api/posts"`.
 
-Creating a user rejects a duplicate `username` or `email` with `400`. Creating a post
-requires a `user_id` that exists, and returns `404` when it does not.
+Creating a user rejects a duplicate `username` or `email` with `400`. Creating a post no
+longer takes a `user_id` — the author is the token's owner, so a `user_id` sent in the body
+is simply ignored rather than honoured.
 
-`PUT` is a full replacement: it takes the same body as `POST /api/posts`, so `title`,
-`content`, and `user_id` all have to be sent, and moving a post to another author returns
-`404` if that user does not exist. `PATCH` takes a partial body — `PostUpdate` and
+`PUT` is a full replacement: `title` and `content` both have to be sent. It cannot move a
+post to a different author, since the author is fixed at creation. `PATCH` takes a partial body — `PostUpdate` and
 `UserUpdate` make every field optional, and only the fields present in the request are
 written. Updating a user to a `username` or `email` that another user already has returns
 `400`. Both deletes return `204` with an empty body, and `404` for an unknown id.
@@ -143,16 +149,47 @@ the `/api/users/me` lookup, de-duplicates concurrent calls, drops a token the AP
 and provides `logout`. `layout.html` uses it to swap the navbar between the logged-out
 (Login / Register) and logged-in (New Post / Logout) states on every page.
 
+### Authorization
+
+`auth.py` exposes `get_current_user` as a dependency, aliased to `CurrentUser`, which
+resolves the bearer token to a `User` row or raises `401`. Any endpoint that declares a
+`current_user: CurrentUser` parameter is authenticated by that alone — FastAPI resolves the
+dependency before the handler body runs.
+
+Ownership is then checked in the handler:
+
+```python
+if post.user_id != current_user.id:
+    raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, ...)
+```
+
+The two failures are distinct on purpose: `401` means no usable token, `403` means a valid
+token for the wrong account. Because the dependency runs first, an unauthenticated request
+for a post that does not exist returns `401`, not `404` — the request never reaches the
+lookup.
+
+Reads stayed public. Only the write endpoints gained `CurrentUser`, so the home page, single
+posts, and user profiles still work signed out.
+
+`PostCreate` no longer carries `user_id`; `create_post` takes it from `current_user.id`. That
+removes the spoofing question entirely rather than validating against it — a `user_id` in the
+request body is not a field on the model, so it is discarded before the handler sees it.
+
 ### Front end
 
 The pages are server-rendered, but the write operations are done from the browser against
 the JSON API rather than through form POSTs and redirects:
 
-| Action      | Where it lives                          | Request                     |
-| ----------- | --------------------------------------- | --------------------------- |
-| New post    | Navbar button, modal in `layout.html`   | `POST /api/posts`           |
-| Edit post   | Buttons on the post page, `post.html`   | `PATCH /api/posts/{id}`     |
-| Delete post | Buttons on the post page, `post.html`   | `DELETE /api/posts/{id}`    |
+| Action         | Where it lives                          | Request                     |
+| -------------- | --------------------------------------- | --------------------------- |
+| New post       | Navbar button, modal in `layout.html`   | `POST /api/posts`           |
+| Edit post      | Buttons on the post page, `post.html`   | `PATCH /api/posts/{id}`     |
+| Delete post    | Buttons on the post page, `post.html`   | `DELETE /api/posts/{id}`    |
+| Update profile | `account.html`                          | `PATCH /api/users/{id}`     |
+| Delete account | Danger zone in `account.html`           | `DELETE /api/users/{id}`    |
+
+Every one of those attaches `Authorization: Bearer <token>` from `localStorage`. A `401`
+response sends the browser to `/login`; a `403` shows the error modal.
 
 The create modal lives in `layout.html`, so the New Post button works from any page.
 `post.html` adds its own edit and delete modals and fills a `{% block scripts %}` that
@@ -167,13 +204,15 @@ On success the page swaps the form modal for the success modal and reloads once 
 dismissed; a delete redirects home instead. A failed request shows the message in the error
 modal, and a network failure falls back to a generic one.
 
-Two placeholders are still in the code until authentication lands:
+`post.html` renders the edit and delete buttons hidden, and `checkOwnership()` reveals them
+only when `getCurrentUser()` comes back as the post's author. That is presentation only — the
+`403` from the API is the actual protection, and it holds whether or not the buttons are on
+screen.
 
-- The create script hardcodes `user_id: 1`, since there is no logged-in user to take it from
-- `post.html` only renders the edit and delete buttons when `post.user_id == 1`
-
-That second one hides the buttons but does not protect anything — the API has no auth yet, so
-`PATCH` and `DELETE` on any post still succeed for anyone who calls them directly.
+`/account` is the logged-in user's own page: it fills the form from `/api/users/me`, sends a
+`PATCH` on save, clears the cached user so the navbar picks up a rename, and holds the logout
+button plus a delete-account danger zone. It redirects to `/login` when there is no token.
+Avatar upload and password change are stubbed out as disabled fields for later.
 
 ### Error handling
 
@@ -213,18 +252,25 @@ Run the development server:
 uv run fastapi dev main.py
 ```
 
-`blog.db` is created automatically on first start, with empty tables. Create a user before
-posting, since a post needs an existing `user_id`:
+`blog.db` is created automatically on first start, with empty tables. Register, log in to get
+a token, then post as that user:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/users \
   -H 'Content-Type: application/json' \
-  -d '{"username": "alice", "email": "alice@example.com"}'
+  -d '{"username": "alice", "email": "alice@example.com", "password": "supersecret1"}'
+
+TOKEN=$(curl -s -X POST http://127.0.0.1:8000/api/users/token \
+  -d 'username=alice@example.com&password=supersecret1' | python -c 'import sys,json;print(json.load(sys.stdin)["access_token"])')
 
 curl -X POST http://127.0.0.1:8000/api/posts \
   -H 'Content-Type: application/json' \
-  -d '{"title": "Hello", "content": "First post.", "user_id": 1}'
+  -H "Authorization: Bearer $TOKEN" \
+  -d '{"title": "Hello", "content": "First post."}'
 ```
+
+The login endpoint takes form-encoded data, not JSON, and its `username` field is your email.
+Or just use `/docs` — the Authorize button drives the same flow.
 
 The app is then available at:
 
@@ -241,7 +287,7 @@ The app is then available at:
 ├── routers/
 │   ├── posts.py             # APIRouter for /api/posts
 │   └── users.py             # APIRouter for /api/users
-├── auth.py                  # Password hashing and JWT create/verify helpers
+├── auth.py                  # Hashing, JWT helpers, and the CurrentUser dependency
 ├── config.py                # Settings loaded from .env by pydantic-settings
 ├── database.py              # Async engine, session factory, Base, get_db dependency
 ├── models.py                # SQLAlchemy ORM models: User and Post
@@ -253,6 +299,7 @@ The app is then available at:
 │   ├── user_posts.html      # Posts belonging to one user
 │   ├── login.html           # Login form
 │   ├── register.html        # Registration form
+│   ├── account.html         # Account settings, profile update, delete account
 │   └── error.html           # Error page used by the exception handlers
 ├── static/
 │   ├── css/main.css         # Custom styles on top of Bootstrap
@@ -283,9 +330,8 @@ Ideas to build on as the project grows:
 - [x] Split the API endpoints into routers
 - [x] Add a browser UI for writing posts, rather than JSON-only endpoints
 - [x] User accounts with real authentication, so the Login and Register buttons work
-- [ ] Take `user_id` from the logged-in user instead of the hardcoded `1` in the create script
-- [ ] Authorization on the write endpoints, so only a post's author can edit or delete it,
-      and the template guard in `post.html` reflects a real permission check
+- [x] Take `user_id` from the logged-in user instead of a value in the request body
+- [x] Authorization on the write endpoints, so only a post's author can edit or delete it
 - [ ] Avatar uploads writing into `media/profile_pics/`
 - [ ] Database migrations with Alembic, instead of `create_all` on startup
 - [ ] Add tests with `pytest` and `httpx`
