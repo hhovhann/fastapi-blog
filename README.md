@@ -40,6 +40,8 @@ classic form POST.
   300x300 JPEG, re-encoded, and stored under a random filename in `media/profile_pics/`
 - Offset/limit pagination on the post listings, with a Load More button that appends the next
   page without a reload
+- Password reset by emailed single-use token, sent with `aiosmtplib` from a FastAPI background
+  task, plus an authenticated change-password endpoint
 - Content-aware error handling: `/api/*` paths return JSON, page routes render an error template
 - Pydantic schemas validating request bodies and shaping API responses
 
@@ -51,6 +53,7 @@ Two tables, defined in `models.py`:
 | ------ | ------------------------------------------------------- |
 | `User` | `id`, `username` (unique), `email` (unique), `password_hash`, `image_file` |
 | `Post` | `id`, `title`, `content`, `user_id` → `users.id`, `date_posted` |
+| `PasswordResetToken` | `id`, `user_id` → `users.id`, `token_hash` (unique), `expires_at`, `created_at` |
 
 `Post.author` and `User.posts` are the two sides of the relationship, configured with
 `cascade="all, delete-orphan"` so deleting a user also deletes their posts. `User.image_path`
@@ -70,6 +73,8 @@ in `static/profile_pics/` otherwise.
 | `GET`  | `/login`                | Login form                           |
 | `GET`  | `/register`             | Registration form                    |
 | `GET`  | `/account`              | Account settings for the logged-in user |
+| `GET`  | `/forgot-password`      | Form to request a reset link         |
+| `GET`  | `/reset-password`       | Form to set a new password, reached from the email |
 
 ### JSON API
 
@@ -84,6 +89,9 @@ in `static/profile_pics/` otherwise.
 | `POST`   | `/api/users`                 | public     | Register a user, returns `201`           |
 | `POST`   | `/api/users/token`           | public     | Log in with form data, returns a JWT     |
 | `GET`    | `/api/users/me`              | token      | The authenticated user                   |
+| `PATCH`  | `/api/users/me/password`     | token      | Change password, needs the current one   |
+| `POST`   | `/api/users/forgot-password` | public     | Request a reset link, always `202`       |
+| `POST`   | `/api/users/reset-password`  | public     | Set a new password using a reset token   |
 | `GET`    | `/api/users/{user_id}`       | public     | Single user                              |
 | `GET`    | `/api/users/{user_id}/posts` | public     | Page of posts by one user                |
 | `PATCH`  | `/api/users/{user_id}/picture` | **owner** | Upload an avatar (multipart)           |
@@ -146,8 +154,9 @@ user. An invalid signature, an expired token, a `sub` that is not an integer, an
 pointing at a deleted user all return `401`.
 
 `auth.py` holds the hashing and token helpers, and `config.py` reads `SECRET_KEY`,
-`ALGORITHM`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `MAX_UPLOAD_SIZE_BYTES`, and `POSTS_PER_PAGE`
-from `.env` via pydantic-settings. Only the first has no default. Copy
+`ALGORITHM`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `MAX_UPLOAD_SIZE_BYTES`, `POSTS_PER_PAGE`,
+`RESET_TOKEN_EXPIRE_MINUTES`, the `MAIL_*` group, and `FRONTEND_URL` from `.env` via
+pydantic-settings. Only `SECRET_KEY` has no default. Copy
 `.env.example` to `.env` and set `SECRET_KEY` before starting the app — it has no default,
 so `Settings()` fails without it. Changing it invalidates every token already issued.
 
@@ -176,6 +185,37 @@ and `has_more` into the template. The button only renders when `has_more` is tru
 script picks up from there, appending each page and hiding the button once `has_more` comes
 back false. Rows added by JavaScript are built with `escapeHtml` from `utils.js`, since a
 post title goes into a template literal rather than through Jinja's autoescaping.
+
+### Password reset
+
+`POST /api/users/forgot-password` always returns `202` with the same message whether or not
+the address belongs to an account, so the endpoint cannot be used to discover which emails are
+registered. The work only happens when a user actually matches.
+
+The token itself is a `secrets.token_urlsafe(32)` value. Only its SHA-256 hash goes into
+`password_reset_tokens` — the raw token exists in the email and nowhere else, so a leaked
+database does not hand over working reset links. Requesting a new link deletes any previous
+token for that user, so only the newest one works.
+
+Sending happens through `BackgroundTasks`, so the response returns immediately instead of
+waiting on the SMTP conversation. `email_utils.py` builds a multipart message with both a
+plain-text and an HTML part (rendered from `templates/email/password_reset.html`) and sends it
+with `aiosmtplib`.
+
+`POST /api/users/reset-password` hashes the submitted token, looks it up, and rejects an
+unknown or expired one with the same `400` either way. Expired rows are deleted when found.
+On success the password is rehashed and **every** reset token for that user is deleted, so a
+token cannot be replayed.
+
+`PATCH /api/users/me/password` is the logged-in path. It verifies the current password before
+accepting a new one, and also clears any outstanding reset tokens — so if someone requested a
+reset link and then remembered their password, the emailed link stops working.
+
+The mail settings (`MAIL_SERVER`, `MAIL_PORT`, `MAIL_USERNAME`, `MAIL_PASSWORD`, `MAIL_FROM`,
+`MAIL_USE_TLS`) and `FRONTEND_URL`, which builds the link in the email, all come from `.env`.
+The defaults point at `localhost:587`, so for local development run a debug SMTP server such
+as [MailHog](https://github.com/mailhog/MailHog) or Python's `aiosmtpd` and watch the mail
+arrive there.
 
 ### File uploads
 
@@ -344,6 +384,7 @@ The app is then available at:
 │   ├── posts.py             # APIRouter for /api/posts
 │   └── users.py             # APIRouter for /api/users
 ├── auth.py                  # Hashing, JWT helpers, and the CurrentUser dependency
+├── email_utils.py           # aiosmtplib sending and the reset-email builder
 ├── image_utils.py           # Pillow processing and avatar file cleanup
 ├── populate_db.py           # Seeds the database with demo users and posts
 ├── config.py                # Settings loaded from .env by pydantic-settings
@@ -357,7 +398,10 @@ The app is then available at:
 │   ├── user_posts.html      # Posts belonging to one user
 │   ├── login.html           # Login form
 │   ├── register.html        # Registration form
-│   ├── account.html         # Account settings, profile update, delete account
+│   ├── account.html         # Account settings, profile update, change password, delete account
+│   ├── forgot_password.html # Request a reset link
+│   └── email/
+│       └── password_reset.html  # HTML body of the reset email
 │   └── error.html           # Error page used by the exception handlers
 ├── static/
 │   ├── css/main.css         # Custom styles on top of Bootstrap
@@ -394,5 +438,8 @@ Ideas to build on as the project grows:
 - [x] Authorization on the write endpoints, so only a post's author can edit or delete it
 - [x] Avatar uploads writing into `media/profile_pics/`
 - [x] Paginate the post listings instead of returning every row
+- [x] Password reset over email, with single-use expiring tokens
+- [ ] Finish the reset UI: `templates/reset_password.html` is referenced by `main.py` but does
+      not exist yet, so the link in the reset email 500s
 - [ ] Database migrations with Alembic, instead of `create_all` on startup
 - [ ] Add tests with `pytest` and `httpx`
