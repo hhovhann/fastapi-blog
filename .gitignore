@@ -1,12 +1,30 @@
-# Created by https://www.toptal.com/developers/gitignore/api/python,macos,visualstudiocode,dotenv
-# Edit at https://www.toptal.com/developers/gitignore?templates=python,macos,visualstudiocode,dotenv
+# Python-generated files
+__pycache__/
+*.py[oc]
+build/
+dist/
+wheels/
+*.egg-info
 
-### dotenv ###
-.env
+# Virtual environments
+.venv
+
+# Editors and OS
+.idea/
+.DS_Store
 
 ### Database Files ###
 *.sqlite3
 *.db
+
+# Uploaded media, keep the directories
+media/*
+!media/profile_pics/
+media/profile_pics/*
+!media/profile_pics/.gitkeep
+
+### dotenv ###
+.env
 
 ### macOS ###
 # General
