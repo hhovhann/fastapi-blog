@@ -32,6 +32,8 @@ classic form POST.
 - Shared front-end helpers in an ES module (`static/js/utils.js`), imported by the page
   scripts with `<script type="module">`
 - Posts listed newest first everywhere, on the pages and in the API
+- Registration and login with password hashing (argon2 via [pwdlib](https://pypi.org/project/pwdlib/))
+  and JWT access tokens, with settings read from a `.env` file by pydantic-settings
 - Content-aware error handling: `/api/*` paths return JSON, page routes render an error template
 - Pydantic schemas validating request bodies and shaping API responses
 
@@ -41,7 +43,7 @@ Two tables, defined in `models.py`:
 
 | Model  | Fields                                                  |
 | ------ | ------------------------------------------------------- |
-| `User` | `id`, `username` (unique), `email` (unique), `image_file` |
+| `User` | `id`, `username` (unique), `email` (unique), `password_hash`, `image_file` |
 | `Post` | `id`, `title`, `content`, `user_id` → `users.id`, `date_posted` |
 
 `Post.author` and `User.posts` are the two sides of the relationship, configured with
@@ -59,6 +61,8 @@ in `static/profile_pics/` otherwise.
 | `GET`  | `/posts`                | Same handler as `/`                  |
 | `GET`  | `/posts/{post_id}`      | Single post page                     |
 | `GET`  | `/users/{user_id}/posts`| Posts written by one user            |
+| `GET`  | `/login`                | Login form                           |
+| `GET`  | `/register`             | Registration form                    |
 
 ### JSON API
 
@@ -70,7 +74,9 @@ in `static/profile_pics/` otherwise.
 | `PUT`    | `/api/posts/{post_id}` | Replace a post, every field required           |
 | `PATCH`  | `/api/posts/{post_id}` | Update only the fields that are sent           |
 | `DELETE` | `/api/posts/{post_id}` | Delete a post, returns `204`                   |
-| `POST`   | `/api/users`           | Create a user, returns `201`                   |
+| `POST`   | `/api/users`           | Register a user, returns `201`                 |
+| `POST`   | `/api/users/token`     | Log in with form data, returns a JWT           |
+| `GET`    | `/api/users/me`        | The authenticated user, needs a bearer token   |
 | `GET`    | `/api/users/{user_id}` | Single user                                    |
 | `GET`    | `/api/users/{user_id}/posts` | Posts written by one user                |
 | `PATCH`  | `/api/users/{user_id}` | Update only the fields that are sent           |
@@ -110,6 +116,32 @@ Two consequences worth knowing about, since both raise `MissingGreenlet` if igno
 
 Table creation moved out of import time into a `lifespan` context manager, which runs
 `create_all` through `run_sync` on startup and disposes the engine on shutdown.
+
+### Authentication
+
+Registration takes a `password` (8-50 characters), hashes it with argon2 through `pwdlib`,
+and stores only the hash in `User.password_hash`. Usernames and emails are compared
+case-insensitively when checking for duplicates, and emails are stored lowercased.
+
+`POST /api/users/token` is the login endpoint. It takes `OAuth2PasswordRequestForm`, so the
+body is form-encoded rather than JSON, and the form's `username` field carries the email.
+A wrong password and an unknown email both return the same `401` with
+`"Incorrect email or password"`, so the response does not reveal which accounts exist.
+On success it returns a JWT whose `sub` is the user id.
+
+`GET /api/users/me` reads the `Authorization: Bearer <token>` header and returns the token's
+user. An invalid signature, an expired token, a `sub` that is not an integer, and a `sub`
+pointing at a deleted user all return `401`.
+
+`auth.py` holds the hashing and token helpers, and `config.py` reads `SECRET_KEY`,
+`ALGORITHM`, and `ACCESS_TOKEN_EXPIRE_MINUTES` from `.env` via pydantic-settings. Copy
+`.env.example` to `.env` and set `SECRET_KEY` before starting the app — it has no default,
+so `Settings()` fails without it. Changing it invalidates every token already issued.
+
+In the browser, the token goes into `localStorage`. `static/js/auth.js` owns that: it caches
+the `/api/users/me` lookup, de-duplicates concurrent calls, drops a token the API rejects,
+and provides `logout`. `layout.html` uses it to swap the navbar between the logged-out
+(Login / Register) and logged-in (New Post / Logout) states on every page.
 
 ### Front end
 
@@ -168,6 +200,13 @@ Install dependencies:
 uv sync
 ```
 
+Create your `.env` from the template and give it a secret key:
+
+```bash
+cp .env.example .env
+python -c "import secrets; print(secrets.token_hex(32))"   # paste into SECRET_KEY
+```
+
 Run the development server:
 
 ```bash
@@ -202,6 +241,8 @@ The app is then available at:
 ├── routers/
 │   ├── posts.py             # APIRouter for /api/posts
 │   └── users.py             # APIRouter for /api/users
+├── auth.py                  # Password hashing and JWT create/verify helpers
+├── config.py                # Settings loaded from .env by pydantic-settings
 ├── database.py              # Async engine, session factory, Base, get_db dependency
 ├── models.py                # SQLAlchemy ORM models: User and Post
 ├── schemas.py               # Pydantic models for request and response bodies
@@ -210,14 +251,18 @@ The app is then available at:
 │   ├── home.html            # Post list, extends layout.html
 │   ├── post.html            # Single post page, with edit/delete modals and their scripts
 │   ├── user_posts.html      # Posts belonging to one user
+│   ├── login.html           # Login form
+│   ├── register.html        # Registration form
 │   └── error.html           # Error page used by the exception handlers
 ├── static/
 │   ├── css/main.css         # Custom styles on top of Bootstrap
 │   ├── js/utils.js          # ES module: error message + modal helpers
+│   ├── js/auth.js           # ES module: token storage and current-user cache
 │   ├── icons/               # Favicons, touch icons, PWA icons
 │   ├── profile_pics/        # Default avatar
 │   └── site.webmanifest     # PWA manifest
 ├── media/profile_pics/      # Uploaded avatars, ignored by git
+├── .env.example             # Template for the .env file, safe to commit
 ├── pyproject.toml           # Project metadata and dependencies
 └── uv.lock                  # Pinned dependency versions
 ```
@@ -237,8 +282,8 @@ Ideas to build on as the project grows:
 - [x] Convert the app to async, with an async database driver
 - [x] Split the API endpoints into routers
 - [x] Add a browser UI for writing posts, rather than JSON-only endpoints
-- [ ] User accounts with real authentication, so the Login and Register buttons work,
-      and `user_id` comes from the session instead of the hardcoded `1` in the create script
+- [x] User accounts with real authentication, so the Login and Register buttons work
+- [ ] Take `user_id` from the logged-in user instead of the hardcoded `1` in the create script
 - [ ] Authorization on the write endpoints, so only a post's author can edit or delete it,
       and the template guard in `post.html` reflects a real permission check
 - [ ] Avatar uploads writing into `media/profile_pics/`
