@@ -4,16 +4,19 @@ A small blog application built with [FastAPI](https://fastapi.tiangolo.com/) —
 project for working through the framework's routing, Jinja2 templating, static files,
 database access, and automatic API docs.
 
-Posts and users are stored in a local SQLite database via SQLAlchemy. The database file is
-created on startup and is not tracked in git.
+Posts and users are stored in a local SQLite database, reached asynchronously through
+SQLAlchemy's async engine and `aiosqlite`. Every route is an `async def` coroutine. The
+database file is created on startup and is not tracked in git.
 
 ## Features
 
 - Server-rendered pages with Jinja2 template inheritance (`layout.html` → `home.html`)
 - Responsive layout styled with [Bootstrap 5](https://getbootstrap.com/) plus a custom stylesheet
 - Light / dark / auto theme switcher, with the choice persisted in `localStorage`
-- SQLite persistence through [SQLAlchemy](https://www.sqlalchemy.org/) ORM models, with the
-  session injected into routes as a dependency
+- SQLite persistence through [SQLAlchemy](https://www.sqlalchemy.org/) ORM models, with an
+  `AsyncSession` injected into routes as a dependency
+- Fully asynchronous request handling: `async def` routes awaiting non-blocking queries, so
+  a slow database call does not tie up the event loop
 - Users and posts as related tables, so a post knows its author and a user knows its posts
 - Static file serving mounted at `/static`, uploaded media at `/media`
 - PWA basics: web app manifest, favicons, touch icons, and theme color
@@ -58,6 +61,7 @@ in `static/profile_pics/` otherwise.
 | `DELETE` | `/api/posts/{post_id}` | Delete a post, returns `204`                   |
 | `POST`   | `/api/users`           | Create a user, returns `201`                   |
 | `GET`    | `/api/users/{user_id}` | Single user                                    |
+| `GET`    | `/api/users/{user_id}/posts` | Posts written by one user                |
 | `PATCH`  | `/api/users/{user_id}` | Update only the fields that are sent           |
 | `DELETE` | `/api/users/{user_id}` | Delete a user and their posts, returns `204`   |
 
@@ -72,6 +76,24 @@ requires a `user_id` that exists, and returns `404` when it does not.
 `UserUpdate` make every field optional, and only the fields present in the request are
 written. Updating a user to a `username` or `email` that another user already has returns
 `400`. Both deletes return `204` with an empty body, and `404` for an unknown id.
+
+### Async and eager loading
+
+`database.py` builds a `create_async_engine` over the `sqlite+aiosqlite` driver and an
+`async_sessionmaker`, and `get_db` yields an `AsyncSession`. Routes are `async def` and
+`await` every query, commit, and refresh.
+
+Two consequences worth knowing about, since both raise `MissingGreenlet` if ignored:
+
+- A relationship can no longer lazy-load during response serialization or template
+  rendering, so any query whose result exposes `post.author` selects it up front with
+  `selectinload(models.Post.author)`. After a write, `db.refresh(post, attribute_names=["author"])`
+  does the same job.
+- The session maker sets `expire_on_commit=False`, so attributes stay readable after
+  `await db.commit()` without another round trip.
+
+Table creation moved out of import time into a `lifespan` context manager, which runs
+`create_all` through `run_sync` on startup and disposes the engine on shutdown.
 
 ### Error handling
 
@@ -128,8 +150,8 @@ The app is then available at:
 
 ```
 .
-├── main.py                  # FastAPI app: routes, mounts, exception handlers
-├── database.py              # Engine, session factory, Base, get_db dependency
+├── main.py                  # FastAPI app: lifespan, routes, mounts, exception handlers
+├── database.py              # Async engine, session factory, Base, get_db dependency
 ├── models.py                # SQLAlchemy ORM models: User and Post
 ├── schemas.py               # Pydantic models for request and response bodies
 ├── templates/
@@ -161,6 +183,7 @@ Ideas to build on as the project grows:
 - [x] Move posts into a database (SQLite via SQLAlchemy)
 - [x] Add Pydantic models for request/response validation
 - [x] Support creating, updating, and deleting posts
+- [x] Convert the app to async, with an async database driver
 - [ ] Add HTML forms for writing posts, rather than JSON-only endpoints
 - [ ] User accounts with real authentication, so the Login and Register buttons work,
       and `user_id` comes from the session instead of the request body
