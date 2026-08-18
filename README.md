@@ -36,6 +36,10 @@ classic form POST.
   and JWT access tokens, with settings read from a `.env` file by pydantic-settings
 - Ownership-based authorization: reads are public, writes need a bearer token, and editing or
   deleting something you do not own returns `403`
+- Avatar uploads processed with [Pillow](https://python-pillow.org/): cropped to a square
+  300x300 JPEG, re-encoded, and stored under a random filename in `media/profile_pics/`
+- Offset/limit pagination on the post listings, with a Load More button that appends the next
+  page without a reload
 - Content-aware error handling: `/api/*` paths return JSON, page routes render an error template
 - Pydantic schemas validating request bodies and shaping API responses
 
@@ -71,7 +75,7 @@ in `static/profile_pics/` otherwise.
 
 | Method   | Path                         | Auth       | Description                              |
 | -------- | ---------------------------- | ---------- | ---------------------------------------- |
-| `GET`    | `/api/posts`                 | public     | All posts, newest first                  |
+| `GET`    | `/api/posts`                 | public     | Page of posts, newest first              |
 | `POST`   | `/api/posts`                 | token      | Create a post as yourself, returns `201` |
 | `GET`    | `/api/posts/{post_id}`       | public     | Single post                              |
 | `PUT`    | `/api/posts/{post_id}`       | **owner**  | Replace a post, every field required     |
@@ -81,7 +85,9 @@ in `static/profile_pics/` otherwise.
 | `POST`   | `/api/users/token`           | public     | Log in with form data, returns a JWT     |
 | `GET`    | `/api/users/me`              | token      | The authenticated user                   |
 | `GET`    | `/api/users/{user_id}`       | public     | Single user                              |
-| `GET`    | `/api/users/{user_id}/posts` | public     | Posts written by one user                |
+| `GET`    | `/api/users/{user_id}/posts` | public     | Page of posts by one user                |
+| `PATCH`  | `/api/users/{user_id}/picture` | **owner** | Upload an avatar (multipart)           |
+| `DELETE` | `/api/users/{user_id}/picture` | **owner** | Remove the avatar, back to the default |
 | `PATCH`  | `/api/users/{user_id}`       | **owner**  | Update only the fields that are sent     |
 | `DELETE` | `/api/users/{user_id}`       | **owner**  | Delete a user and their posts, `204`     |
 
@@ -140,7 +146,8 @@ user. An invalid signature, an expired token, a `sub` that is not an integer, an
 pointing at a deleted user all return `401`.
 
 `auth.py` holds the hashing and token helpers, and `config.py` reads `SECRET_KEY`,
-`ALGORITHM`, and `ACCESS_TOKEN_EXPIRE_MINUTES` from `.env` via pydantic-settings. Copy
+`ALGORITHM`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `MAX_UPLOAD_SIZE_BYTES`, and `POSTS_PER_PAGE`
+from `.env` via pydantic-settings. Only the first has no default. Copy
 `.env.example` to `.env` and set `SECRET_KEY` before starting the app — it has no default,
 so `Settings()` fails without it. Changing it invalidates every token already issued.
 
@@ -148,6 +155,46 @@ In the browser, the token goes into `localStorage`. `static/js/auth.js` owns tha
 the `/api/users/me` lookup, de-duplicates concurrent calls, drops a token the API rejects,
 and provides `logout`. `layout.html` uses it to swap the navbar between the logged-out
 (Login / Register) and logged-in (New Post / Logout) states on every page.
+
+### Pagination
+
+The two listing endpoints take `skip` and `limit` query parameters, validated by FastAPI —
+`skip` must be `>= 0` and `limit` between `1` and `100`, so a bad value returns `422` rather
+than a huge query. Both default to `limit=10`.
+
+They no longer return a bare list. The response is an object, which is what makes a Load More
+button possible — the client needs to know whether to keep going:
+
+```json
+{ "posts": [...], "total": 26, "skip": 0, "limit": 10, "has_more": true }
+```
+
+`total` comes from a separate `COUNT(*)`, and `has_more` is `skip + len(posts) < total`.
+
+The page routes render the first `settings.posts_per_page` posts server-side and pass `limit`
+and `has_more` into the template. The button only renders when `has_more` is true, and the
+script picks up from there, appending each page and hiding the button once `has_more` comes
+back false. Rows added by JavaScript are built with `escapeHtml` from `utils.js`, since a
+post title goes into a template literal rather than through Jinja's autoescaping.
+
+### File uploads
+
+`PATCH /api/users/{id}/picture` takes a multipart upload and hands it to `image_utils.py`,
+which does the processing in a thread pool so the event loop is not blocked by Pillow:
+
+- `ImageOps.exif_transpose` applies the EXIF orientation, so phone photos are not sideways
+- `ImageOps.fit` crops and scales to a square 300x300 with LANCZOS resampling
+- `RGBA`, `LA`, and `P` images are converted to `RGB` so they can be saved as JPEG
+- The result is written as `{uuid4}.jpg` at quality 85
+
+Storing a random filename rather than the uploaded one means the original name never touches
+the filesystem, so there is no path traversal to worry about, and every upload gets a unique
+URL that sidesteps browser caching of a replaced avatar. Uploads over
+`max_upload_size_bytes` (5MB by default) are rejected with `400`.
+
+The old file is deleted after a successful replace, on `DELETE .../picture`, and when the
+account itself is deleted, so orphans do not accumulate. `media/` is gitignored, so uploads
+stay out of the repository.
 
 ### Authorization
 
@@ -272,6 +319,15 @@ curl -X POST http://127.0.0.1:8000/api/posts \
 The login endpoint takes form-encoded data, not JSON, and its `username` field is your email.
 Or just use `/docs` — the Authorize button drives the same flow.
 
+To get a database with enough content to see pagination working, run the seed script instead:
+
+```bash
+uv run python populate_db.py
+```
+
+It creates demo users with avatars from `populate_images/` and enough posts to fill several
+pages.
+
 The app is then available at:
 
 - http://127.0.0.1:8000 — home page
@@ -288,6 +344,8 @@ The app is then available at:
 │   ├── posts.py             # APIRouter for /api/posts
 │   └── users.py             # APIRouter for /api/users
 ├── auth.py                  # Hashing, JWT helpers, and the CurrentUser dependency
+├── image_utils.py           # Pillow processing and avatar file cleanup
+├── populate_db.py           # Seeds the database with demo users and posts
 ├── config.py                # Settings loaded from .env by pydantic-settings
 ├── database.py              # Async engine, session factory, Base, get_db dependency
 ├── models.py                # SQLAlchemy ORM models: User and Post
@@ -305,10 +363,12 @@ The app is then available at:
 │   ├── css/main.css         # Custom styles on top of Bootstrap
 │   ├── js/utils.js          # ES module: error message + modal helpers
 │   ├── js/auth.js           # ES module: token storage and current-user cache
+│   │                        # utils.js also holds escapeHtml and formatDate
 │   ├── icons/               # Favicons, touch icons, PWA icons
 │   ├── profile_pics/        # Default avatar
 │   └── site.webmanifest     # PWA manifest
 ├── media/profile_pics/      # Uploaded avatars, ignored by git
+├── populate_images/         # Source images used by populate_db.py
 ├── .env.example             # Template for the .env file, safe to commit
 ├── pyproject.toml           # Project metadata and dependencies
 └── uv.lock                  # Pinned dependency versions
@@ -332,6 +392,7 @@ Ideas to build on as the project grows:
 - [x] User accounts with real authentication, so the Login and Register buttons work
 - [x] Take `user_id` from the logged-in user instead of a value in the request body
 - [x] Authorization on the write endpoints, so only a post's author can edit or delete it
-- [ ] Avatar uploads writing into `media/profile_pics/`
+- [x] Avatar uploads writing into `media/profile_pics/`
+- [x] Paginate the post listings instead of returning every row
 - [ ] Database migrations with Alembic, instead of `create_all` on startup
 - [ ] Add tests with `pytest` and `httpx`
