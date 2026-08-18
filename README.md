@@ -21,6 +21,8 @@ database file is created on startup and is not tracked in git.
 - Static file serving mounted at `/static`, uploaded media at `/media`
 - PWA basics: web app manifest, favicons, touch icons, and theme color
 - JSON API alongside the HTML pages, with interactive docs, covering full CRUD for posts and users
+- API endpoints split into `APIRouter` modules under `routers/`, mounted with a path prefix
+  and a tag, so `main.py` keeps only the page routes and app setup
 - Content-aware error handling: `/api/*` paths return JSON, page routes render an error template
 - Pydantic schemas validating request bodies and shaping API responses
 
@@ -65,7 +67,12 @@ in `static/profile_pics/` otherwise.
 | `PATCH`  | `/api/users/{user_id}` | Update only the fields that are sent           |
 | `DELETE` | `/api/users/{user_id}` | Delete a user and their posts, returns `204`   |
 
-The page routes are excluded from the OpenAPI schema, so `/docs` shows only the `/api` routes.
+The page routes are excluded from the OpenAPI schema, so `/docs` shows only the `/api` routes,
+grouped into `users` and `posts` sections by the tag each router is included with.
+
+The paths above are the full URLs. Inside the router modules the paths are written relative
+to the prefix given in `main.py` — `@router.get("/{post_id}")` in `routers/posts.py` becomes
+`/api/posts/{post_id}` because the router is included with `prefix="/api/posts"`.
 
 Creating a user rejects a duplicate `username` or `email` with `400`. Creating a post
 requires a `user_id` that exists, and returns `404` when it does not.
@@ -150,7 +157,10 @@ The app is then available at:
 
 ```
 .
-├── main.py                  # FastAPI app: lifespan, routes, mounts, exception handlers
+├── main.py                  # FastAPI app: lifespan, page routes, mounts, exception handlers
+├── routers/
+│   ├── posts.py             # APIRouter for /api/posts
+│   └── users.py             # APIRouter for /api/users
 ├── database.py              # Async engine, session factory, Base, get_db dependency
 ├── models.py                # SQLAlchemy ORM models: User and Post
 ├── schemas.py               # Pydantic models for request and response bodies
@@ -184,6 +194,7 @@ Ideas to build on as the project grows:
 - [x] Add Pydantic models for request/response validation
 - [x] Support creating, updating, and deleting posts
 - [x] Convert the app to async, with an async database driver
+- [x] Split the API endpoints into routers
 - [ ] Add HTML forms for writing posts, rather than JSON-only endpoints
 - [ ] User accounts with real authentication, so the Login and Register buttons work,
       and `user_id` comes from the session instead of the request body
