@@ -38,6 +38,8 @@ classic form POST.
   and JWT access tokens, with settings read from a `.env` file by pydantic-settings
 - Ownership-based authorization: reads are public, writes need a bearer token, and editing or
   deleting something you do not own returns `403`
+- Async test suite on `pytest` and `httpx`, with each test rolled back in its own transaction
+  and S3 faked by `moto`, so nothing reaches AWS
 - Avatar uploads processed with [Pillow](https://python-pillow.org/): cropped to a square
   300x300 JPEG, re-encoded, and stored in an [Amazon S3](https://aws.amazon.com/s3/) bucket
   with `boto3` under a random key
@@ -503,6 +505,49 @@ The app is then available at:
 - http://127.0.0.1:8000/docs — interactive Swagger UI
 - http://127.0.0.1:8000/redoc — ReDoc
 
+## Tests
+
+```bash
+uv sync --all-groups     # pytest and moto live in the dev group
+uv run pytest
+```
+
+The suite needs **one thing set up: a PostgreSQL database for tests.** `tests/conftest.py`
+connects to `postgresql+psycopg://bloguser:blogpass@localhost/test_blog`, so create that role
+and database first:
+
+```bash
+psql -d postgres -c "CREATE ROLE bloguser LOGIN PASSWORD 'blogpass';"
+createdb -O bloguser test_blog
+```
+
+It does **not** need AWS. `moto` intercepts the S3 calls and serves an in-memory bucket, and
+the fixtures set dummy `AWS_*` credentials so a misconfigured test cannot reach a real
+account. The same goes for email: `send_password_reset_email` is patched with an `AsyncMock`
+and the test asserts on the arguments it was called with rather than sending anything.
+
+It also does not need a `.env`. `conftest.py` sets every required setting in `os.environ`
+before `config` is imported, so a fresh clone can run the suite without configuring the app
+first.
+
+How the fixtures fit together:
+
+| Fixture | Scope | What it does |
+| --- | --- | --- |
+| `test_engine` | session | One async engine on the test database, `NullPool` so connections are not reused across the loop |
+| `setup_database` | session | `create_all` before the run, `drop_all` after, leaving the database empty |
+| `db_session` | function | Opens a connection and an outer transaction, binds the session to it with `join_transaction_mode="create_savepoint"`, and **rolls back afterwards** |
+| `mocked_aws` | function | Starts `mock_aws` and creates the bucket, yielding the client so tests can assert on its contents |
+| `client` | function | An `AsyncClient` over `ASGITransport`, with `get_db` overridden to hand out `db_session` |
+
+The rollback in `db_session` is what keeps the tests independent: the app commits normally
+inside its handlers, but those commits land in a savepoint that disappears when the outer
+transaction rolls back. Tests can therefore assume an empty database without truncating
+tables between runs, and the order they run in does not matter.
+
+`conftest.py` also exposes `create_test_user`, `login_user`, and `auth_header`, so a test that
+needs an authenticated client is three lines rather than a repeated registration and login.
+
 ## Project structure
 
 ```
@@ -547,6 +592,11 @@ The app is then available at:
 ├── aws_bucket_policy.json   # Public-read policy for the profile_pics/ prefix
 ├── aws_iam_policy.json      # Least-privilege policy for the app's IAM user
 ├── check_s3.py              # Verifies the S3 credentials and bucket work
+├── tests/
+│   ├── conftest.py          # Fixtures: test engine, rolled-back session, moto S3, client
+│   ├── test_users.py        # Registration, validation, avatar upload, password reset
+│   ├── test_posts.py        # CRUD, authorization, pagination
+│   └── test_image.jpg       # Small fixture image for the upload test
 ├── populate_images/         # Source images used by populate_db.py
 ├── .env.example             # Template for the .env file, safe to commit
 ├── pyproject.toml           # Project metadata and dependencies
@@ -575,4 +625,4 @@ Ideas to build on as the project grows:
 - [x] Paginate the post listings instead of returning every row
 - [x] Password reset over email, with single-use expiring tokens
 - [x] Database migrations with Alembic, instead of `create_all` on startup
-- [ ] Add tests with `pytest` and `httpx`
+- [x] Add tests with `pytest` and `httpx`
