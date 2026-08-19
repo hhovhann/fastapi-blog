@@ -40,6 +40,8 @@ classic form POST.
   deleting something you do not own returns `403`
 - Async test suite on `pytest` and `httpx`, with each test rolled back in its own transaction
   and S3 faked by `moto`, so nothing reaches AWS
+- Deployable to a VPS behind Nginx with a Let's Encrypt certificate, run under systemd —
+  the whole sequence is written up in `vps_setup.txt`
 - Avatar uploads processed with [Pillow](https://python-pillow.org/): cropped to a square
   300x300 JPEG, re-encoded, and stored in an [Amazon S3](https://aws.amazon.com/s3/) bucket
   with `boto3` under a random key
@@ -94,6 +96,7 @@ in `static/profile_pics/` otherwise.
 | `POST`   | `/api/users`                 | public     | Register a user, returns `201`           |
 | `POST`   | `/api/users/token`           | public     | Log in with form data, returns a JWT     |
 | `GET`    | `/api/users/me`              | token      | The authenticated user                   |
+| `GET`    | `/health`                    | public     | Liveness probe, `503` if the DB is down  |
 | `PATCH`  | `/api/users/me/password`     | token      | Change password, needs the current one   |
 | `POST`   | `/api/users/forgot-password` | public     | Request a reset link, always `202`       |
 | `POST`   | `/api/users/reset-password`  | public     | Set a new password using a reset token   |
@@ -421,7 +424,11 @@ An unknown id returns `404`; a non-integer id fails path validation and returns 
 
 Jinja2 comes in via the `fastapi[standard]` extra, so no separate install is needed.
 
-## Getting started
+## Running it locally
+
+This section is the **development** setup: the app served by `fastapi dev` on your own
+machine, with settings in a local `.env`. For putting it on a server, see
+[Deployment](#deployment).
 
 Install dependencies:
 
@@ -504,6 +511,37 @@ The app is then available at:
 - http://127.0.0.1:8000/api/posts — JSON API
 - http://127.0.0.1:8000/docs — interactive Swagger UI
 - http://127.0.0.1:8000/redoc — ReDoc
+
+## Deployment
+
+`vps_setup.txt` is the full runbook for putting this on an Ubuntu 24.04 VPS — every command
+in order, from a fresh server to a live HTTPS site. In outline:
+
+| Stage | What it covers |
+| --- | --- |
+| Server hardening | Non-root user, SSH keys, password auth disabled, UFW, Fail2Ban, unattended security upgrades |
+| Nginx and TLS | Nginx as a reverse proxy, DNS pointed at the box, a Let's Encrypt certificate with automatic renewal |
+| The application | Python and uv, PostgreSQL, the repository, `.env` at `chmod 600`, `alembic upgrade head` |
+| Process supervision | A systemd unit running `fastapi run` bound to `127.0.0.1`, so only Nginx can reach it |
+
+A few points where the deployment shapes the application rather than the other way round:
+
+- **Uvicorn binds to `127.0.0.1`, not `0.0.0.0`.** Nginx is the only thing that talks to it,
+  and the firewall never needs port 8000 open.
+- **`--proxy-headers`** tells Uvicorn to trust the `X-Forwarded-*` headers Nginx sets, so the
+  app sees the real client IP and knows the original request was HTTPS.
+- **`FRONTEND_URL` must become the real `https://` domain.** It builds the link inside the
+  password reset email, so a stale `localhost` value sends users somewhere that does not exist.
+- **Settings come from a `.env` file that is created on the server**, never copied from a
+  development machine and never committed. `.env.example` remains the list of what to fill in.
+- **Migrations are a deploy step.** Nothing creates tables at runtime, so
+  `alembic upgrade head` runs on the server after each pull.
+
+### Health check
+
+`GET /health` runs `SELECT 1` and returns `{"status": "healthy"}`, or `503` if the database
+does not answer. It is a liveness probe for a load balancer, uptime monitor, or a systemd
+watchdog — a plain `GET /` would also touch the database, but it renders a full page to do it.
 
 ## Tests
 
@@ -592,6 +630,7 @@ needs an authenticated client is three lines rather than a repeated registration
 ├── aws_bucket_policy.json   # Public-read policy for the profile_pics/ prefix
 ├── aws_iam_policy.json      # Least-privilege policy for the app's IAM user
 ├── check_s3.py              # Verifies the S3 credentials and bucket work
+├── vps_setup.txt            # Step-by-step VPS deployment runbook
 ├── tests/
 │   ├── conftest.py          # Fixtures: test engine, rolled-back session, moto S3, client
 │   ├── test_users.py        # Registration, validation, avatar upload, password reset
@@ -610,14 +649,12 @@ no schema at all until `alembic upgrade head` builds it.
 
 ### Next
 
-- [ ] Deploy to a VPS: Nginx as a reverse proxy, HTTPS via Let's Encrypt, a custom
-      domain, and basic server hardening
 - [ ] Containerise with Docker and deploy to a serverless container platform, with
       the same custom domain
 - [ ] Extract structured data from uploaded documents with the Claude API
 
 <details>
-<summary><strong>Covered so far</strong> — 16 items, from Jinja2 templates to Alembic and pytest</summary>
+<summary><strong>Covered so far</strong> — 17 items, from Jinja2 templates to a deployed VPS</summary>
 
 - [x] Render real templates with Jinja2 instead of inline HTML
 - [x] Add a detail route for a single post (`/posts/{id}`)
@@ -635,5 +672,7 @@ no schema at all until `alembic upgrade head` builds it.
 - [x] Password reset over email, with single-use expiring tokens
 - [x] Database migrations with Alembic, instead of `create_all` on startup
 - [x] Add tests with `pytest` and `httpx`
+- [x] Deploy to a VPS: Nginx as a reverse proxy, HTTPS via Let's Encrypt, a custom
+      domain, and basic server hardening
 
 </details>
