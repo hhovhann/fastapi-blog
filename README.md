@@ -24,7 +24,7 @@ classic form POST.
 - Fully asynchronous request handling: `async def` routes awaiting non-blocking queries, so
   a slow database call does not tie up the event loop
 - Users and posts as related tables, so a post knows its author and a user knows its posts
-- Static file serving mounted at `/static`, uploaded media at `/media`
+- Static file serving mounted at `/static`; user uploads live in S3, not on the app server
 - PWA basics: web app manifest, favicons, touch icons, and theme color
 - JSON API alongside the HTML pages, with interactive docs, covering full CRUD for posts and users
 - API endpoints split into `APIRouter` modules under `routers/`, mounted with a path prefix
@@ -39,7 +39,8 @@ classic form POST.
 - Ownership-based authorization: reads are public, writes need a bearer token, and editing or
   deleting something you do not own returns `403`
 - Avatar uploads processed with [Pillow](https://python-pillow.org/): cropped to a square
-  300x300 JPEG, re-encoded, and stored under a random filename in `media/profile_pics/`
+  300x300 JPEG, re-encoded, and stored in an [Amazon S3](https://aws.amazon.com/s3/) bucket
+  with `boto3` under a random key
 - Offset/limit pagination on the post listings, with a Load More button that appends the next
   page without a reload
 - Password reset by emailed single-use token, sent with `aiosmtplib` from a FastAPI background
@@ -158,8 +159,9 @@ pointing at a deleted user all return `401`.
 
 `auth.py` holds the hashing and token helpers, and `config.py` reads `SECRET_KEY`,
 `ALGORITHM`, `ACCESS_TOKEN_EXPIRE_MINUTES`, `MAX_UPLOAD_SIZE_BYTES`, `POSTS_PER_PAGE`,
-`RESET_TOKEN_EXPIRE_MINUTES`, the `MAIL_*` group, and `FRONTEND_URL` from `.env` via
-pydantic-settings. Only `SECRET_KEY` has no default. Copy
+`RESET_TOKEN_EXPIRE_MINUTES`, the `MAIL_*` and `S3_*` groups, and `FRONTEND_URL` from `.env`
+via pydantic-settings. `DATABASE_URL`, `SECRET_KEY`, and `S3_BUCKET_NAME` have no defaults, so
+the app will not start until all three are set. Copy
 `.env.example` to `.env` and set `SECRET_KEY` before starting the app — it has no default,
 so `Settings()` fails without it. Changing it invalidates every token already issued.
 
@@ -256,22 +258,83 @@ arrive there.
 
 ### File uploads
 
+> **Requires an S3 bucket.** `S3_BUCKET_NAME` has no default, so the app will not start until
+> it is set. See [Setting up S3](#setting-up-s3) below for the bucket, IAM user, and policies
+> you need to create in AWS first.
+
 `PATCH /api/users/{id}/picture` takes a multipart upload and hands it to `image_utils.py`,
 which does the processing in a thread pool so the event loop is not blocked by Pillow:
 
 - `ImageOps.exif_transpose` applies the EXIF orientation, so phone photos are not sideways
 - `ImageOps.fit` crops and scales to a square 300x300 with LANCZOS resampling
 - `RGBA`, `LA`, and `P` images are converted to `RGB` so they can be saved as JPEG
-- The result is written as `{uuid4}.jpg` at quality 85
+- The result is encoded to JPEG at quality 85 **in memory** and uploaded to
+  `s3://<bucket>/profile_pics/{uuid4}.jpg`
 
-Storing a random filename rather than the uploaded one means the original name never touches
-the filesystem, so there is no path traversal to worry about, and every upload gets a unique
-URL that sidesteps browser caching of a replaced avatar. Uploads over
-`max_upload_size_bytes` (5MB by default) are rejected with `400`.
+Nothing is written to the app's own disk. That is the point of the move: the server keeps no
+local state, so it can be redeployed or run behind several instances without avatars living
+on whichever machine happened to receive the upload.
 
-The old file is deleted after a successful replace, on `DELETE .../picture`, and when the
-account itself is deleted, so orphans do not accumulate. `media/` is gitignored, so uploads
-stay out of the repository.
+`boto3` is synchronous, so the upload and delete calls are wrapped in `run_in_threadpool` the
+same way the Pillow work is, keeping the event loop free.
+
+Storing a random key rather than the uploaded filename means the original name never reaches
+S3, so there is no path traversal to worry about, and every upload gets a unique URL that
+sidesteps caching of a replaced avatar. Uploads over `max_upload_size_bytes` (5MB by default)
+are rejected with `400`, and the size and format checks both run before anything is sent to
+S3. A failed upload is reported as a `500` with a plain message rather than a stack trace, and
+leaves the existing avatar in place.
+
+The old object is deleted after a successful replace, on `DELETE .../picture`, and when the
+account itself is deleted, so orphans do not accumulate.
+
+`User.image_path` returns the public object URL,
+`https://<bucket>.s3.<region>.amazonaws.com/profile_pics/<key>`, which is why the bucket needs
+a policy allowing public reads on that prefix. Users without an avatar still fall back to
+`/static/profile_pics/default.jpg`, which is served by the app.
+
+### Setting up S3
+
+Do this in AWS **before** running the app — there is no default bucket and nothing is created
+for you.
+
+1. **Create the bucket.** Any name and region; the name goes in `S3_BUCKET_NAME` and the
+   region in `S3_REGION`. Uploads are stored under a `profile_pics/` prefix.
+
+2. **Allow public reads on that prefix.** Avatars are loaded straight from S3 by the browser.
+   Turn off "Block all public access" for the bucket, then apply `aws_bucket_policy.json`
+   (Permissions → Bucket policy), replacing `fastapi-blog-uploads` with your bucket name:
+
+   ```json
+   {
+     "Effect": "Allow",
+     "Principal": "*",
+     "Action": "s3:GetObject",
+     "Resource": "arn:aws:s3:::fastapi-blog-uploads/profile_pics/*"
+   }
+   ```
+
+   Note this grants read access to anyone with the URL. Keys are random UUIDs, so they are not
+   guessable, but they are not private either — fine for avatars, not for anything sensitive.
+
+3. **Create an IAM user for the app** and attach `aws_iam_policy.json`, which grants only
+   `s3:PutObject` and `s3:DeleteObject`, and only under `profile_pics/`. The app never needs
+   to read objects back or touch the rest of the bucket, so it is not granted either.
+
+4. **Give the app credentials.** Either put the IAM user's access key in `S3_ACCESS_KEY_ID`
+   and `S3_SECRET_ACCESS_KEY`, or leave both unset and let boto3 pick up the standard sources
+   — `~/.aws/credentials`, environment variables, or an instance role in production, which is
+   the better option there since it avoids long-lived keys entirely.
+
+Then check the wiring before starting the app:
+
+```bash
+uv run python check_s3.py
+```
+
+It uploads a small test object and deletes it again, printing what failed if anything did.
+`S3_ENDPOINT_URL` exists for pointing at an S3-compatible service such as MinIO or LocalStack
+instead of AWS; leave it unset for real S3.
 
 ### Authorization
 
@@ -336,7 +399,6 @@ screen.
 `/account` is the logged-in user's own page: it fills the form from `/api/users/me`, sends a
 `PATCH` on save, clears the cached user so the navbar picks up a rename, and holds the logout
 button plus a delete-account danger zone. It redirects to `/login` when there is no token.
-Avatar upload and password change are stubbed out as disabled fields for later.
 
 ### Error handling
 
@@ -353,6 +415,7 @@ An unknown id returns `404`; a non-integer id fails path validation and returns 
 - Python 3.13 (see `.python-version`)
 - [uv](https://docs.astral.sh/uv/) for dependency management
 - PostgreSQL, running and reachable at whatever `DATABASE_URL` points to
+- An AWS S3 bucket and credentials that can write to it — see [Setting up S3](#setting-up-s3)
 
 Jinja2 comes in via the `fastapi[standard]` extra, so no separate install is needed.
 
@@ -370,12 +433,21 @@ Create the database:
 createdb blog
 ```
 
-Create your `.env` from the template, then set `DATABASE_URL` and `SECRET_KEY` — neither has
-a default, so the app will not start without them:
+Set up the S3 bucket, IAM user, and policies in AWS — the app has no default bucket and will
+not start without one. The steps are in [Setting up S3](#setting-up-s3).
+
+Create your `.env` from the template, then fill in the three settings that have no default —
+`DATABASE_URL`, `SECRET_KEY`, and `S3_BUCKET_NAME`:
 
 ```bash
 cp .env.example .env
 python -c "import secrets; print(secrets.token_hex(32))"   # paste into SECRET_KEY
+```
+
+Confirm the bucket is reachable before going further:
+
+```bash
+uv run python check_s3.py
 ```
 
 Apply the migrations. Nothing creates tables at runtime any more, so this step is required
@@ -436,7 +508,7 @@ The app is then available at:
 │   └── users.py             # APIRouter for /api/users
 ├── auth.py                  # Hashing, JWT helpers, and the CurrentUser dependency
 ├── email_utils.py           # aiosmtplib sending and the reset-email builder
-├── image_utils.py           # Pillow processing and avatar file cleanup
+├── image_utils.py           # Pillow processing plus S3 upload and delete
 ├── populate_db.py           # Seeds the database with demo users and posts
 ├── config.py                # Settings loaded from .env by pydantic-settings
 ├── database.py              # Async engine, session factory, Base, get_db dependency
@@ -467,7 +539,9 @@ The app is then available at:
 │   ├── icons/               # Favicons, touch icons, PWA icons
 │   ├── profile_pics/        # Default avatar
 │   └── site.webmanifest     # PWA manifest
-├── media/profile_pics/      # Uploaded avatars, ignored by git
+├── aws_bucket_policy.json   # Public-read policy for the profile_pics/ prefix
+├── aws_iam_policy.json      # Least-privilege policy for the app's IAM user
+├── check_s3.py              # Verifies the S3 credentials and bucket work
 ├── populate_images/         # Source images used by populate_db.py
 ├── .env.example             # Template for the .env file, safe to commit
 ├── pyproject.toml           # Project metadata and dependencies
@@ -492,7 +566,7 @@ Ideas to build on as the project grows:
 - [x] User accounts with real authentication, so the Login and Register buttons work
 - [x] Take `user_id` from the logged-in user instead of a value in the request body
 - [x] Authorization on the write endpoints, so only a post's author can edit or delete it
-- [x] Avatar uploads writing into `media/profile_pics/`
+- [x] Avatar uploads, first onto local disk and then into an S3 bucket
 - [x] Paginate the post listings instead of returning every row
 - [x] Password reset over email, with single-use expiring tokens
 - [x] Database migrations with Alembic, instead of `create_all` on startup
