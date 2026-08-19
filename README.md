@@ -608,7 +608,16 @@ no schema at all until `alembic upgrade head` builds it.
 
 ## Roadmap
 
-Ideas to build on as the project grows:
+### Next
+
+- [ ] Deploy to a VPS: Nginx as a reverse proxy, HTTPS via Let's Encrypt, a custom
+      domain, and basic server hardening
+- [ ] Containerise with Docker and deploy to a serverless container platform, with
+      the same custom domain
+- [ ] Extract structured data from uploaded documents with the Claude API
+
+<details>
+<summary><strong>Covered so far</strong> — 16 items, from Jinja2 templates to Alembic and pytest</summary>
 
 - [x] Render real templates with Jinja2 instead of inline HTML
 - [x] Add a detail route for a single post (`/posts/{id}`)
@@ -626,3 +635,5 @@ Ideas to build on as the project grows:
 - [x] Password reset over email, with single-use expiring tokens
 - [x] Database migrations with Alembic, instead of `create_all` on startup
 - [x] Add tests with `pytest` and `httpx`
+
+</details>
