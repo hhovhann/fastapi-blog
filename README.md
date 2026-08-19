@@ -4,9 +4,9 @@ A small blog application built with [FastAPI](https://fastapi.tiangolo.com/) —
 project for working through the framework's routing, Jinja2 templating, static files,
 database access, and automatic API docs.
 
-Posts and users are stored in a local SQLite database, reached asynchronously through
-SQLAlchemy's async engine and `aiosqlite`. Every route is an `async def` coroutine. The
-database file is created on startup and is not tracked in git.
+Posts and users are stored in PostgreSQL, reached asynchronously through SQLAlchemy's async
+engine and `psycopg`. Every route is an `async def` coroutine. The schema is owned by Alembic
+migrations rather than created on startup.
 
 Writing, editing, and deleting posts happens in the browser: Bootstrap modals collect the
 input and `fetch` calls talk to the same JSON API the docs expose, so no page does a
@@ -17,8 +17,10 @@ classic form POST.
 - Server-rendered pages with Jinja2 template inheritance (`layout.html` → `home.html`)
 - Responsive layout styled with [Bootstrap 5](https://getbootstrap.com/) plus a custom stylesheet
 - Light / dark / auto theme switcher, with the choice persisted in `localStorage`
-- SQLite persistence through [SQLAlchemy](https://www.sqlalchemy.org/) ORM models, with an
+- PostgreSQL persistence through [SQLAlchemy](https://www.sqlalchemy.org/) ORM models, with an
   `AsyncSession` injected into routes as a dependency
+- Schema managed by [Alembic](https://alembic.sqlalchemy.org/) migrations, so the database is
+  versioned and upgrades are repeatable rather than implicit
 - Fully asynchronous request handling: `async def` routes awaiting non-blocking queries, so
   a slow database call does not tie up the event loop
 - Users and posts as related tables, so a post knows its author and a user knows its posts
@@ -121,8 +123,9 @@ written. Updating a user to a `username` or `email` that another user already ha
 
 ### Async and eager loading
 
-`database.py` builds a `create_async_engine` over the `sqlite+aiosqlite` driver and an
-`async_sessionmaker`, and `get_db` yields an `AsyncSession`. Routes are `async def` and
+`database.py` builds a `create_async_engine` from `settings.database_url` — a
+`postgresql+psycopg://` URL — and an `async_sessionmaker`, and `get_db` yields an
+`AsyncSession`. Routes are `async def` and
 `await` every query, commit, and refresh.
 
 Two consequences worth knowing about, since both raise `MissingGreenlet` if ignored:
@@ -134,8 +137,8 @@ Two consequences worth knowing about, since both raise `MissingGreenlet` if igno
 - The session maker sets `expire_on_commit=False`, so attributes stay readable after
   `await db.commit()` without another round trip.
 
-Table creation moved out of import time into a `lifespan` context manager, which runs
-`create_all` through `run_sync` on startup and disposes the engine on shutdown.
+The `lifespan` context manager no longer creates tables; it only disposes the engine on
+shutdown. Alembic owns the schema now — see below.
 
 ### Authentication
 
@@ -164,6 +167,33 @@ In the browser, the token goes into `localStorage`. `static/js/auth.js` owns tha
 the `/api/users/me` lookup, de-duplicates concurrent calls, drops a token the API rejects,
 and provides `logout`. `layout.html` uses it to swap the navbar between the logged-out
 (Login / Register) and logged-in (New Post / Logout) states on every page.
+
+### Migrations
+
+The app used to call `Base.metadata.create_all` on startup, which is fine for a single
+developer and wrong for anything else: it creates tables that do not exist but never alters
+one that has changed, so a new column on an existing database silently never appears.
+
+Alembic replaces it. `alembic/versions/` holds the ordered revisions, each with an `upgrade`
+and a `downgrade`, and the database records which revision it is on in an `alembic_version`
+table. `alembic/env.py` is wired for the async engine and pulls the URL from
+`settings.database_url`, so migrations and the app always agree on which database they mean.
+
+```bash
+uv run alembic upgrade head             # apply everything outstanding
+uv run alembic current                  # which revision this database is on
+uv run alembic history                  # the full chain
+uv run alembic downgrade -1             # step back one revision
+uv run alembic revision --autogenerate -m "add something"
+```
+
+`--autogenerate` diffs `models.py` against the live database and writes the difference into a
+new revision. Read what it produces before applying it — it detects added and dropped columns
+well, but it cannot see a rename, which it emits as a drop plus an add, and that loses data.
+
+The `likes` column on `Post` is the worked example: it exists as both a model field and a
+revision, added with `server_default="0"` so the column can be `NOT NULL` on a table that
+already has rows.
 
 ### Pagination
 
@@ -322,6 +352,7 @@ An unknown id returns `404`; a non-integer id fails path validation and returns 
 
 - Python 3.13 (see `.python-version`)
 - [uv](https://docs.astral.sh/uv/) for dependency management
+- PostgreSQL, running and reachable at whatever `DATABASE_URL` points to
 
 Jinja2 comes in via the `fastapi[standard]` extra, so no separate install is needed.
 
@@ -333,11 +364,25 @@ Install dependencies:
 uv sync
 ```
 
-Create your `.env` from the template and give it a secret key:
+Create the database:
+
+```bash
+createdb blog
+```
+
+Create your `.env` from the template, then set `DATABASE_URL` and `SECRET_KEY` — neither has
+a default, so the app will not start without them:
 
 ```bash
 cp .env.example .env
 python -c "import secrets; print(secrets.token_hex(32))"   # paste into SECRET_KEY
+```
+
+Apply the migrations. Nothing creates tables at runtime any more, so this step is required
+before the first start:
+
+```bash
+uv run alembic upgrade head
 ```
 
 Run the development server:
@@ -346,8 +391,7 @@ Run the development server:
 uv run fastapi dev main.py
 ```
 
-`blog.db` is created automatically on first start, with empty tables. Register, log in to get
-a token, then post as that user:
+The tables start empty. Register, log in to get a token, then post as that user:
 
 ```bash
 curl -X POST http://127.0.0.1:8000/api/users \
@@ -398,6 +442,11 @@ The app is then available at:
 ├── database.py              # Async engine, session factory, Base, get_db dependency
 ├── models.py                # SQLAlchemy ORM models: User and Post
 ├── schemas.py               # Pydantic models for request and response bodies
+├── alembic.ini              # Alembic configuration
+├── alembic/
+│   ├── env.py               # Migration environment, async engine, URL from settings
+│   ├── script.py.mako       # Template for generated revisions
+│   └── versions/            # The ordered migration revisions
 ├── templates/
 │   ├── layout.html          # Base template: navbar, sidebar, footer, theme toggle, create/result modals
 │   ├── home.html            # Post list, extends layout.html
@@ -425,8 +474,8 @@ The app is then available at:
 └── uv.lock                  # Pinned dependency versions
 ```
 
-`blog.db` sits in the project root at runtime and is gitignored, so each clone starts with
-its own empty database.
+The database lives in PostgreSQL rather than in the project directory, so a clone starts with
+no schema at all until `alembic upgrade head` builds it.
 
 ## Roadmap
 
@@ -434,7 +483,7 @@ Ideas to build on as the project grows:
 
 - [x] Render real templates with Jinja2 instead of inline HTML
 - [x] Add a detail route for a single post (`/posts/{id}`)
-- [x] Move posts into a database (SQLite via SQLAlchemy)
+- [x] Move posts into a database (SQLAlchemy ORM, later moved from SQLite to PostgreSQL)
 - [x] Add Pydantic models for request/response validation
 - [x] Support creating, updating, and deleting posts
 - [x] Convert the app to async, with an async database driver
@@ -446,5 +495,5 @@ Ideas to build on as the project grows:
 - [x] Avatar uploads writing into `media/profile_pics/`
 - [x] Paginate the post listings instead of returning every row
 - [x] Password reset over email, with single-use expiring tokens
-- [ ] Database migrations with Alembic, instead of `create_all` on startup
+- [x] Database migrations with Alembic, instead of `create_all` on startup
 - [ ] Add tests with `pytest` and `httpx`
