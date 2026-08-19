@@ -40,8 +40,10 @@ classic form POST.
   deleting something you do not own returns `403`
 - Async test suite on `pytest` and `httpx`, with each test rolled back in its own transaction
   and S3 faked by `moto`, so nothing reaches AWS
-- Deployable to a VPS behind Nginx with a Let's Encrypt certificate, run under systemd —
-  the whole sequence is written up in `vps_setup.txt`
+- Two deployment paths: a VPS behind Nginx under systemd (`vps_setup.txt`), or a multi-stage
+  Docker image for a serverless container platform
+- Security headers on every response — frame and MIME-sniffing protection, a referrer policy,
+  and HSTS once it is served from a real domain
 - Avatar uploads processed with [Pillow](https://python-pillow.org/): cropped to a square
   300x300 JPEG, re-encoded, and stored in an [Amazon S3](https://aws.amazon.com/s3/) bucket
   with `boto3` under a random key
@@ -514,6 +516,12 @@ The app is then available at:
 
 ## Deployment
 
+Two supported paths. A VPS gives you one machine you administer; a container gives you an
+artefact a platform runs for you, scaled to zero when idle. The application code is the same
+either way — everything that differs is configuration.
+
+### On a VPS
+
 `vps_setup.txt` is the full runbook for putting this on an Ubuntu 24.04 VPS — every command
 in order, from a fresh server to a live HTTPS site. In outline:
 
@@ -537,11 +545,56 @@ A few points where the deployment shapes the application rather than the other w
 - **Migrations are a deploy step.** Nothing creates tables at runtime, so
   `alembic upgrade head` runs on the server after each pull.
 
+### In a container
+
+The `Dockerfile` is a two-stage build. The first stage installs dependencies with `uv` and
+the second copies only the result, so the toolchain never ships in the running image:
+
+```bash
+docker build -t fastapi-blog .
+docker run --rm -p 8080:8080 --env-file .env fastapi-blog
+```
+
+What each part is doing, and why it matters on a serverless platform:
+
+- **Dependencies install before the source is copied**, so a code change reuses the cached
+  dependency layer instead of resolving the lockfile again.
+- **`uv sync --locked --no-dev`** installs exactly what `uv.lock` pins and leaves `pytest`
+  and `moto` out of the image.
+- **The container runs as `appuser`, not root**, which is a requirement on several platforms
+  and good practice everywhere else.
+- **The port is read from `$PORT`** rather than hardcoded. Serverless platforms assign a port
+  and expect the process to listen on it; `8080` is only the fallback.
+- **`--proxy-headers --forwarded-allow-ips '*'`** does the same job the Nginx setup needs,
+  since the platform's load balancer terminates TLS and forwards over plain HTTP.
+- **`exec` in the `CMD`** replaces the shell, so `SIGTERM` reaches the app and shutdown is
+  clean rather than a ten-second kill.
+
+Configuration arrives as environment variables set on the platform, not from a `.env` file
+in the image. `.env.example` is still the list of what to set. Migrations do not run at
+startup, so `alembic upgrade head` needs to happen as a release step or a one-off job before
+new code serves traffic.
+
+> **Before pushing an image to any registry, add a `.dockerignore`.** The build context is
+> copied by `COPY . ./`, and with no ignore file that includes `.env`, `.venv`, and `.git` —
+> so the image would carry your secret key, database URL, and S3 credentials to wherever it
+> is published. At minimum ignore `.env*`, `.venv`, `.git`, `media`, `populate_images`,
+> `__pycache__`, and `tests`.
+
+### Security headers
+
+A middleware sets `X-Frame-Options`, `X-Content-Type-Options`, and a default
+`Referrer-Policy` on every response, including static files and error pages.
+`Strict-Transport-Security` is added too, but only when the request host is not `localhost`
+or `127.0.0.1` — so local development over plain HTTP is not pinned to HTTPS by a stale
+header. The stricter `no-referrer` that `/reset-password` sets for itself is left alone.
+
 ### Health check
 
 `GET /health` runs `SELECT 1` and returns `{"status": "healthy"}`, or `503` if the database
-does not answer. It is a liveness probe for a load balancer, uptime monitor, or a systemd
-watchdog — a plain `GET /` would also touch the database, but it renders a full page to do it.
+does not answer. It is a liveness probe for a load balancer, uptime monitor, container
+platform, or systemd watchdog — a plain `GET /` would also touch the database, but it renders
+a full page to do it.
 
 ## Tests
 
@@ -631,6 +684,7 @@ needs an authenticated client is three lines rather than a repeated registration
 ├── aws_iam_policy.json      # Least-privilege policy for the app's IAM user
 ├── check_s3.py              # Verifies the S3 credentials and bucket work
 ├── vps_setup.txt            # Step-by-step VPS deployment runbook
+├── Dockerfile               # Two-stage build for container deployment
 ├── tests/
 │   ├── conftest.py          # Fixtures: test engine, rolled-back session, moto S3, client
 │   ├── test_users.py        # Registration, validation, avatar upload, password reset
@@ -649,12 +703,10 @@ no schema at all until `alembic upgrade head` builds it.
 
 ### Next
 
-- [ ] Containerise with Docker and deploy to a serverless container platform, with
-      the same custom domain
 - [ ] Extract structured data from uploaded documents with the Claude API
 
 <details>
-<summary><strong>Covered so far</strong> — 17 items, from Jinja2 templates to a deployed VPS</summary>
+<summary><strong>Covered so far</strong> — 18 items, from Jinja2 templates to VPS and container deploys</summary>
 
 - [x] Render real templates with Jinja2 instead of inline HTML
 - [x] Add a detail route for a single post (`/posts/{id}`)
@@ -674,5 +726,7 @@ no schema at all until `alembic upgrade head` builds it.
 - [x] Add tests with `pytest` and `httpx`
 - [x] Deploy to a VPS: Nginx as a reverse proxy, HTTPS via Let's Encrypt, a custom
       domain, and basic server hardening
+- [x] Containerise with Docker and deploy to a serverless container platform, with
+      the same custom domain
 
 </details>
