@@ -489,7 +489,12 @@ uv run python populate_db.py
 ```
 
 It creates demo users with avatars from `populate_images/` and enough posts to fill several
-pages.
+pages, driving the real API so the avatars go through the same processing and S3 upload path
+as a normal request.
+
+It **wipes first**: every post, user, and reset token is deleted, along with the avatar
+objects those users pointed at in S3. That makes it safe to re-run, and unsafe to point at
+anything you care about — check `DATABASE_URL` and `S3_BUCKET_NAME` before running it.
 
 The app is then available at:
 
@@ -509,7 +514,7 @@ The app is then available at:
 ├── auth.py                  # Hashing, JWT helpers, and the CurrentUser dependency
 ├── email_utils.py           # aiosmtplib sending and the reset-email builder
 ├── image_utils.py           # Pillow processing plus S3 upload and delete
-├── populate_db.py           # Seeds the database with demo users and posts
+├── populate_db.py           # Wipes and reseeds demo users, posts, and avatars
 ├── config.py                # Settings loaded from .env by pydantic-settings
 ├── database.py              # Async engine, session factory, Base, get_db dependency
 ├── models.py                # SQLAlchemy ORM models: User and Post
