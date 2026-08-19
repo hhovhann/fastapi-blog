@@ -9,7 +9,7 @@ from fastapi.exception_handlers import (
 from fastapi.exceptions import RequestValidationError
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -35,6 +35,18 @@ templates = Jinja2Templates(directory="templates")
 
 app.include_router(users.router, prefix="/api/users", tags=["users"])
 app.include_router(posts.router, prefix="/api/posts", tags=["posts"])
+
+
+@app.get("/health")
+async def health_check(db: Annotated[AsyncSession, Depends(get_db)]):
+    try:
+        await db.execute(text("SELECT 1"))
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Database unavailable",
+        ) from exc
+    return {"status": "healthy"}
 
 
 @app.get("/", include_in_schema=False, name="home")
@@ -67,9 +79,9 @@ async def home(request: Request, db: Annotated[AsyncSession, Depends(get_db)]):
 
 @app.get("/posts/{post_id}", include_in_schema=False)
 async def post_page(
-    request: Request,
-    post_id: int,
-    db: Annotated[AsyncSession, Depends(get_db)],
+        request: Request,
+        post_id: int,
+        db: Annotated[AsyncSession, Depends(get_db)],
 ):
     result = await db.execute(
         select(models.Post)
@@ -89,9 +101,9 @@ async def post_page(
 
 @app.get("/users/{user_id}/posts", include_in_schema=False, name="user_posts")
 async def user_posts_page(
-    request: Request,
-    user_id: int,
-    db: Annotated[AsyncSession, Depends(get_db)],
+        request: Request,
+        user_id: int,
+        db: Annotated[AsyncSession, Depends(get_db)],
 ):
     result = await db.execute(select(models.User).where(models.User.id == user_id))
     user = result.scalars().first()
@@ -181,15 +193,15 @@ async def reset_password_page(request: Request):
 
 @app.exception_handler(StarletteHTTPException)
 async def general_http_exception_handler(
-    request: Request,
-    exception: StarletteHTTPException,
+        request: Request,
+        exception: StarletteHTTPException,
 ):
     if request.url.path.startswith("/api"):
         return await http_exception_handler(request, exception)
 
     message = (
-        exception.detail
-        or "An error occurred. Please check your request and try again."
+            exception.detail
+            or "An error occurred. Please check your request and try again."
     )
 
     return templates.TemplateResponse(
@@ -206,8 +218,8 @@ async def general_http_exception_handler(
 
 @app.exception_handler(RequestValidationError)
 async def validation_exception_handler(
-    request: Request,
-    exception: RequestValidationError,
+        request: Request,
+        exception: RequestValidationError,
 ):
     if request.url.path.startswith("/api"):
         return await request_validation_exception_handler(request, exception)
