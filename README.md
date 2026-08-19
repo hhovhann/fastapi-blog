@@ -575,11 +575,16 @@ in the image. `.env.example` is still the list of what to set. Migrations do not
 startup, so `alembic upgrade head` needs to happen as a release step or a one-off job before
 new code serves traffic.
 
-> **Before pushing an image to any registry, add a `.dockerignore`.** The build context is
-> copied by `COPY . ./`, and with no ignore file that includes `.env`, `.venv`, and `.git` —
-> so the image would carry your secret key, database URL, and S3 credentials to wherever it
-> is published. At minimum ignore `.env*`, `.venv`, `.git`, `media`, `populate_images`,
-> `__pycache__`, and `tests`.
+`.dockerignore` is what keeps that honest. `COPY . ./` would otherwise copy the whole project
+directory into the image — `.env` included — so a published image would carry the secret key,
+database URL, and S3 credentials to whoever can pull it. It also drops `.venv`, `.git`,
+`tests/`, and `populate_images/`, which takes the build context from roughly 200MB to under
+1MB. Two entries are less obvious than the rest:
+
+- **`.python-version` is ignored on purpose.** It pins 3.13, but the base image chooses the
+  interpreter and `UV_PYTHON_DOWNLOADS=0` means uv cannot fetch a different one.
+- **`README.md` is deliberately kept.** `pyproject.toml` declares `readme = "README.md"`, so
+  the project build reads it and fails without it.
 
 ### Security headers
 

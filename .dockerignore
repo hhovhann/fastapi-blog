@@ -1,0 +1,58 @@
+# Everything the build context does not need. Without this file `COPY . ./`
+# copies the whole project directory into the image, secrets included.
+
+# Secrets. Configuration reaches the container as environment variables set on
+# the platform, never as a file baked into a layer.
+.env
+.env.*
+
+# Local virtualenv. Built for the host OS, and the image builds its own anyway.
+.venv
+
+# Version control and CI
+.git
+.gitignore
+.github
+
+# Pins the interpreter to 3.13, but the base image decides the version and
+# UV_PYTHON_DOWNLOADS=0 means uv cannot fetch another one.
+.python-version
+
+# Python build and cache artifacts
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# Tests and their fixtures
+tests/
+
+# Local databases
+*.db
+*.sqlite3
+
+# Uploads live in S3; this directory is a leftover from before that
+media/
+
+# Seeding: a development-only script and 10MB of source images
+populate_db.py
+populate_images/
+
+# Documentation and one-off setup tooling.
+# README.md is deliberately NOT ignored — pyproject.toml declares
+# `readme = "README.md"`, so the project build reads it.
+vps_setup.txt
+aws_bucket_policy.json
+aws_iam_policy.json
+check_s3.py
+
+# Container files themselves
+Dockerfile
+.dockerignore
+
+# Editor and OS noise
+.idea/
+.vscode/
+.DS_Store
