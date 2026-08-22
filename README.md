@@ -706,10 +706,6 @@ no schema at all until `alembic upgrade head` builds it.
 
 ## Roadmap
 
-### Next
-
-- [ ] Extract structured data from uploaded documents with the Claude API
-
 <details>
 <summary><strong>Covered so far</strong> — 18 items, from Jinja2 templates to VPS and container deploys</summary>
 
@@ -729,9 +725,7 @@ no schema at all until `alembic upgrade head` builds it.
 - [x] Password reset over email, with single-use expiring tokens
 - [x] Database migrations with Alembic, instead of `create_all` on startup
 - [x] Add tests with `pytest` and `httpx`
-- [x] Deploy to a VPS: Nginx as a reverse proxy, HTTPS via Let's Encrypt, a custom
-      domain, and basic server hardening
-- [x] Containerise with Docker and deploy to a serverless container platform, with
-      the same custom domain
+- [x] Deploy to a VPS: Nginx as a reverse proxy, HTTPS via Let's Encrypt, a custom domain, and basic server hardening
+- [x] Containerise with Docker and deploy to a serverless container platform, with the same custom domain
 
 </details>
